@@ -115,10 +115,14 @@ export async function readResponsesStream(response: Response) {
     const code = response.status === 401 ? "reconnect_required" : response.status === 403 ? "plan_permission_required" : response.status === 429 ? "rate_limited" : "provider_error";
     throw new AppError(`OpenAI 요청 실패 (HTTP ${response.status}). ${response.status === 401 ? "다시 로그인하세요." : "구독 권한과 사용량을 확인하세요."}`, 502, code);
   }
-  if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) throw new AppError("OpenAI의 스트림 응답 형식이 올바르지 않습니다.", 502, "invalid_response");
+  if (!response.body) throw new AppError("OpenAI가 빈 응답을 반환했습니다.", 502, "invalid_response");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "", text = "", completed = false;
+  let format: "sse" | "json" | undefined;
+  const declaredType = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+  const mediaType = ["text/event-stream", "application/json", "text/html", "text/plain"].includes(declaredType || "") ? declaredType : "알 수 없는 Content-Type";
+  const invalidFormat = () => new AppError(`OpenAI가 지원하지 않는 응답을 반환했습니다 (${mediaType}). SSE 이벤트나 완료된 Responses JSON이 아닙니다.`, 502, "invalid_response");
   const processEvent = (block: string) => {
     const data = block.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
     if (!data || data === "[DONE]") return;
@@ -132,7 +136,12 @@ export async function readResponsesStream(response: Response) {
     if (["response.failed", "response.incomplete", "error"].includes(event.type)) {
       const code = event.response?.error?.code || event.error?.code || event.code;
       const limited = ["subscription_sharing_usage_limit_exceeded", "subscription_sharing_usage_unavailable", "rate_limit_exceeded"].includes(code);
-      throw new AppError(limited ? "ChatGPT 구독 공유 사용량을 사용할 수 없거나 한도에 도달했습니다. ChatGPT 사용량 설정을 확인하세요." : "OpenAI 응답이 완료되지 않았습니다. 모델 권한과 요청을 확인하세요.", 502, limited ? "rate_limited" : "incomplete_response");
+      const knownMessages: Record<string, string> = {
+        model_not_found: "이 계정에서 선택한 모델을 사용할 수 없습니다. 모델 목록을 다시 조회하세요.",
+        unsupported_parameter: "선택한 모델이 요청 옵션을 지원하지 않습니다.",
+        insufficient_permissions: "이 계정에 요청한 모델의 사용 권한이 없습니다.",
+      };
+      throw new AppError(limited ? "ChatGPT 구독 공유 사용량을 사용할 수 없거나 한도에 도달했습니다. ChatGPT 사용량 설정을 확인하세요." : knownMessages[code] || "OpenAI 응답이 완료되지 않았습니다. 모델 권한과 요청을 확인하세요.", 502, limited ? "rate_limited" : "incomplete_response");
     }
   };
   try {
@@ -141,13 +150,29 @@ export async function readResponsesStream(response: Response) {
       if (done) { buffer += decoder.decode(); break; }
       buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, "\n");
       if (buffer.length + text.length > 2_000_000) throw new AppError("모델 응답이 테스트 크기 제한을 초과했습니다.", 502, "response_too_large");
+      if (!format) {
+        const start = buffer.trimStart();
+        if (start.startsWith("{")) format = "json";
+        else if (/^(data:|event:|:)/.test(start)) format = "sse";
+        else if (start && !["data:", "event:"].some((prefix) => prefix.startsWith(start))) throw invalidFormat();
+      }
+      if (format !== "sse") continue;
       let boundary;
       while ((boundary = buffer.indexOf("\n\n")) >= 0) {
         processEvent(buffer.slice(0, boundary)); buffer = buffer.slice(boundary + 2);
       }
       if (completed) break;
     }
-    if (buffer.trim() && !completed) processEvent(buffer);
+    if (format === "json") {
+      let result;
+      try { result = JSON.parse(buffer); } catch { throw invalidFormat(); }
+      if (!result || typeof result !== "object" || Array.isArray(result)) throw invalidFormat();
+      if (result.error) processEvent(`data: ${JSON.stringify({ type: "error", error: result.error })}`);
+      else if (result.object === "response" && result.status === "completed") processEvent(`data: ${JSON.stringify({ type: "response.completed", response: result })}`);
+      else if (result.object === "response" && ["failed", "incomplete"].includes(result.status)) processEvent(`data: ${JSON.stringify({ type: `response.${result.status}`, response: result })}`);
+      else if (["response.completed", "response.failed", "response.incomplete", "error"].includes(result.type)) processEvent(`data: ${JSON.stringify(result)}`);
+      else throw invalidFormat();
+    } else if (buffer.trim() && !completed) processEvent(buffer);
   } finally { await reader.cancel().catch(() => {}); }
   if (!completed) throw new AppError("응답 스트림이 완료 전에 끊겼습니다. 성공으로 기록하지 않았습니다.", 502, "interrupted_stream");
   if (!text.trim()) throw new AppError("완료된 응답에 텍스트가 없습니다.", 502, "empty_response");

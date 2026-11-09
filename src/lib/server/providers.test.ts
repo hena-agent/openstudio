@@ -64,6 +64,23 @@ describe("provider requests", () => {
     await expect(readResponsesStream(new Response('data: {"type":"response.output_text.delta","delta":"partial"}\n\n', { headers: { "Content-Type": "text/event-stream" } }))).rejects.toMatchObject({ code: "interrupted_stream" });
   });
 
+  it("reads valid SSE even when the upstream media type is missing or mislabeled", async () => {
+    const body = 'data: {"type":"response.output_text.delta","delta":"done"}\n\ndata: {"type":"response.completed"}\n\n';
+    for (const headers of [new Headers(), new Headers({ "Content-Type": "application/json" })]) {
+      expect(await readResponsesStream(new Response(body, { headers }))).toBe("done");
+    }
+  });
+
+  it("accepts a completed JSON response but never treats incomplete JSON as success", async () => {
+    expect(await readResponsesStream(Response.json({ object: "response", status: "completed", output: [{ content: [{ type: "output_text", text: "done" }] }] }))).toBe("done");
+    await expect(readResponsesStream(Response.json({ object: "response", status: "in_progress", output: [] }))).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("classifies JSON usage errors instead of hiding them behind a stream format error", async () => {
+    await expect(readResponsesStream(Response.json({ error: { code: "subscription_sharing_usage_limit_exceeded", message: "private upstream detail" } }))).rejects.toMatchObject({ code: "rate_limited" });
+    await expect(readResponsesStream(new Response("<html>private upstream detail</html>", { headers: { "Content-Type": "text/html" } }))).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
   it("does not count partial text followed by a usage-limit event as success", async () => {
     const stream = 'data: {"type":"response.output_text.delta","delta":"partial"}\n\ndata: {"type":"response.failed","response":{"error":{"code":"subscription_sharing_usage_limit_exceeded"}}}\n\n';
     await expect(readResponsesStream(new Response(stream, { headers: { "Content-Type": "text/event-stream" } }))).rejects.toMatchObject({ code: "rate_limited" });
