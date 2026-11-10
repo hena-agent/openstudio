@@ -1,0 +1,12 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "ui": "tui",
+  "globalDependencies": ["tsconfig.json", "scripts/**/*.ts"],
+  "tasks": {
+    "build": { "dependsOn": ["^build"], "outputs": [] },
+    "@openstudio/client#build": { "dependsOn": ["^build"], "outputs": [".next/**", "!.next/cache/**"] },
+    "typecheck": { "dependsOn": ["^typecheck"], "outputs": [] },
+    "dev": { "cache": false, "persistent": true, "passThroughEnv": ["OPENSTUDIO_*", "GITHUB_COPILOT_CLIENT_ID"] },
+    "start": { "cache": false, "persistent": true, "passThroughEnv": ["OPENSTUDIO_*", "GITHUB_COPILOT_CLIENT_ID"] }
+  }
+}

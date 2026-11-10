@@ -1,5 +1,46 @@
 # 연결 검증 기록
 
+## 2026-11-10 Turbo에서 앱 통합 실행
+
+- 루트 `pnpm dev`와 `pnpm start`를 각각 `turbo run dev --continue=always`, `turbo run start --continue=always`로 변경했습니다. 자체 fork 실행기는 제거했습니다.
+- 각 앱이 환경 설정·포트 바인딩·종료를 담당합니다. `.data/runtime/`에는 PID·인스턴스 ID·loopback 주소만 저장하고, 상대 프로세스가 없거나 기록이 잘못됐으면 사용하지 않습니다.
+- client 프록시는 현재 server 주소를 읽고, server의 Origin 검사는 현재 client 주소를 읽습니다. client가 없을 때는 변경 요청을 거부합니다. 앱을 다시 실행해 포트가 달라져도 상대 앱의 재시작 없이 새 주소를 사용합니다.
+- 타입 검사·127개 테스트·Turbo 빌드·diff 공백 검사가 통과했습니다. 새 테스트는 런타임 기록 교체·종료 정리·중단 프로세스·잘못된 주소·client 주소 변경 후 Origin 제한을 검증합니다.
+- 별도 임시 DB에서 실제 `pnpm dev`의 두 앱 동시 실행과 프록시를 확인했습니다. client를 강제 종료했을 때 server health가 유지됐고, 필터 명령으로 client를 다시 실행한 뒤 새 Origin은 허용하고 옛 Origin은 거부했습니다. server만 다시 실행했을 때 기존 client가 새 API 주소로 연결되는 것도 확인했습니다.
+- 별도 임시 DB와 테스트용 키로 `pnpm start`의 동시 실행·프록시를 확인하고 Turbo에 SIGINT를 보내 두 앱의 종료를 확인했습니다. 검증용 서버는 모두 종료했으며 실제 유료 제공자 호출은 실행하지 않았습니다.
+
+아래의 자체 실행기·자동 재시작 설명은 이전 구현 이력입니다. 현재 실행 방식은 위 구성을 기준으로 합니다.
+
+## 2026-11-10 pnpm 전환
+
+- 실행 중인 OpenStudio 실행기·client·server를 종료했습니다.
+- 패키지 매니저를 `pnpm@12.4.2`로 고정하고 workspace 정의를 `pnpm-workspace.yaml`로 이전했습니다. 내부 패키지는 `workspace:*`로 연결합니다.
+- npm 잠금 파일의 기존 의존성 버전을 가져와 `pnpm-lock.yaml`을 생성하고 `package-lock.json`을 제거했습니다. 설치 스크립트는 필요한 esbuild만 허용합니다.
+- 검증 명령은 `pnpm install --frozen-lockfile`, `pnpm typecheck`, `pnpm test`, `pnpm build`입니다. 개발 서버는 다시 실행하지 않습니다.
+- 고정 잠금 파일 설치·타입 검사·124개 테스트·Turbo 빌드·diff 공백 검사를 통과했습니다.
+
+## 2026-11-10 Turbo TUI 실행
+
+- 루트 dev/start 스크립트를 Turbo 실행으로 통합하고 `turbo.json`에 TUI를 지정했습니다. client·server를 함께 보여주되 한쪽 종료가 다른 쪽을 중단시키지 않습니다.
+- 각 앱이 자신의 포트와 종료를 담당합니다. `.data/runtime/{client,server}.json`에는 PID·임의 인스턴스 ID·loopback 주소만 원자적으로 공개합니다. 앱은 상대 주소를 요청 시 다시 읽으며 상대 앱 재시작에 따라 포트가 바뀌어도 동작합니다.
+- 주소 기록이 없거나 잘못된 경우 변경 요청은 실패 폐쇄합니다. 새 client 주소만 Origin allowlist에 반영하고 이전 주소는 거부합니다.
+- Turbo에서 두 앱 동시 실행·API 프록시·client 단독 재시작 중 server health 유지·server 단독 재시작 후 기존 client 프록시 갱신을 확인했습니다. 별도로 Turbo start와 SIGINT 전체 종료도 확인하고 검증 서버를 종료했습니다.
+- 타입 검사·127개 테스트·build·diff 공백 검사가 통과했습니다. 실제 유료 제공자 호출은 하지 않았습니다.
+
+## 2026-11-10 Turborepo · SQLite · server 내부 작업 루프
+
+- `apps/client`와 `apps/server`를 독립 프로세스로 분리했습니다. 공통 공개 코드와 SQLite 구현은 각각 `packages/shared`, `packages/database`입니다. 별도 worker 앱은 없습니다.
+- 기존 암호화 Workspace를 SQLite 행으로 이전하고 작업 인덱스·실행권을 같은 DB 커밋으로 반영합니다. 기존 `.enc`와 에셋 경로는 보존하며 DB가 이미 갱신된 항목을 다시 덮어쓰지 않습니다.
+- 생성 접수는 `queued`를 먼저 커밋합니다. server 루프가 실행권을 획득·갱신하며 제출/조회/파일 확보를 처리합니다. client는 상태 GET만 호출합니다.
+- 재시작 시 외부 ID·결과 URL·제출 의도 기록에 따라 복구합니다. 이미 과금됐을 수 있는 제출은 `unknown`으로 보존하고 자동 재제출하지 않습니다.
+- 기본 로컬 모드에서 localhost·127.0.0.1·새 브라우저가 같은 DB 워크스페이스를 엽니다. 기존 session 격리 모드도 유지합니다.
+- 124개 자동화 테스트가 통과했습니다. 기존 원본 보존·재이전 방지·에셋 경로·로컬 ID 유지·SQLite 실행권 경쟁·DB 재개방 후 큐 복구·기존 작업 추적·다운로드만 재시도·불명확 제출 차단·브라우저 코드의 server/database import 경계를 확인했습니다. 제공자 응답은 모의 응답입니다.
+- 실제 개발 실행에서 SQLite로 이전한 연결 목록이 두 호스트에서 일치함을 공개 응답의 해시로 확인했습니다. client를 종료해도 기존 server health가 유지됐고, 실행기가 client만 같은 주소로 다시 시작했습니다. server를 강제 종료한 뒤 새 server로 자동 복구하고 프록시가 새 주소로 이어지며 연결 목록이 그대로 유지되는 것도 확인했습니다.
+- 이 단계에서 실제 유료 생성은 실행하지 않았습니다. 텍스트 호출은 현재 요청 안에서 처리하며 음성·이미지·영상의 영속 실행과 구분합니다.
+- 타입 검사와 Turbo 프로덕션 빌드가 통과했습니다. 별도 임시 DB로 `npm start`를 실행해 프로덕션 화면·API 프록시·local 워크스페이스 초기화도 확인했습니다.
+
+아래는 이전 구현 단계의 기록입니다. 저장소·세션·브라우저 polling 설명은 위의 현재 구조를 기준으로 합니다.
+
 ## 2026-11-10 연결 상태 피드백·localhost
 
 - 연결 카드와 계정 목록에 상태 배지를 항상 표시하고 인증 확인·모델 개수·확인 시각·실제 실행 확인을 펼쳤습니다. 연결된 제공자를 먼저 보여주며 완료 메시지와 모델 선택 동선을 제공합니다.
@@ -91,7 +132,7 @@ OpenCode의 legacy Codex client ID·고정 콜백 포트·backend-api를 복사�
 Continue with ChatGPT → OpenAI authorize → `https://auth.openai.com/log-in`의 실제 이메일·소셜 로그인 화면 확인.
 사용자 인증 정보는 입력하지 않았고 계정 승인을 완료하지 않았다. 대기 중 인증은 앱에서 취소했다.
 
-재현: `npm run dev` → 출력된 프런트 주소 → 연결 추가 → OpenAI / ChatGPT OAuth → Continue with ChatGPT.
+재현: `pnpm dev` → 출력된 프런트 주소 → 연결 → OpenAI / ChatGPT OAuth → Continue with ChatGPT.
 사용자가 승인한 후 목록 조회 → 모델 선택 → 사용량 동의 → 실행.
 성공 시 실제 모델 ID·endpoint·시간과 결과 요약을 추가한다. 토큰·인증 code·nonce·verifier는 기록하지 않는다.
 

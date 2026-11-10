@@ -4,11 +4,13 @@
 
 ## 실행
 
-Node.js 22.12 이상.
+Node.js 22.20 이상. 내장 `node:sqlite`를 사용하므로 별도 DB 서버나 SQLite 네이티브 패키지를 설치하지 않습니다.
+
+패키지 매니저는 `pnpm 12.4.2`이며 루트 `packageManager`에 고정합니다.
 
 ```sh
-npm install
-npm run dev
+pnpm install --frozen-lockfile
+pnpm dev
 ```
 
 터미널에 실제 주소가 출력됩니다. 매번 임의의 **빈 포트에 실제 리스너를 바인딩**합니다.
@@ -19,9 +21,43 @@ npm run dev
 - OpenRouter callback: `http://127.0.0.1:4xxx/auth/openrouter/callback`
 - 브라우저의 `/api/*` 요청은 프런트 서버가 백엔드로 프록시합니다.
 - IPv4 `127.0.0.1`과 IPv6 `::1`에만 바인딩하며 3000번을 사용하지 않습니다. localhost의 API 요청과 개발 WebSocket도 지원합니다.
-- OAuth 콜백은 시작한 호스트(localhost 또는 127.0.0.1)를 유지합니다. 두 호스트의 브라우저 쿠키는 별개이므로 기존 127.0.0.1 연결은 그 주소에서 계속 사용할 수 있습니다. localhost를 처음 열면 별도 워크스페이스입니다.
+- OAuth 콜백은 시작한 호스트(localhost 또는 127.0.0.1)를 유지합니다. 기본 로컬 모드에서는 두 호스트가 같은 SQLite 워크스페이스를 엽니다. 쿠키를 지우거나 다른 브라우저로 열어도 로컬 연결·작업은 유지됩니다.
 
-로컬 개발용 암호화 키는 첫 실행 시 `.data/master.key`에 자동 생성됩니다. 별도 환경 설정 없이 화면·OpenAI OAuth를 시작할 수 있습니다. 키와 `.data/*.enc`는 Git에서 제외됩니다. 기존 키를 삭제하면 저장한 인증 정보를 복호화할 수 없습니다.
+로컬 개발용 암호화 키는 첫 실행 시 저장소 루트의 `.data/master.key`에 자동 생성됩니다. 계정·작업은 `.data/studio.sqlite`, 생성 파일은 `.data/assets/`에 저장합니다. `.data/`는 Git에서 제외됩니다. 기존 키를 삭제하면 저장한 인증 정보를 복호화할 수 없습니다.
+
+## 프로젝트 구조
+
+```text
+apps/client/       Next.js 화면과 API 프록시
+apps/server/       Node API · 제공자 연동 · 내부 작업 루프
+packages/shared/   브라우저에 공개 가능한 타입·모델 정보·검증 스키마
+packages/database/ SQLite 스키마 · 작업 인덱스 · 실행권
+scripts/runtime.ts 앱별 환경 설정·실행 주소 공유
+```
+
+- `pnpm-workspace.yaml`과 Turborepo TUI로 의존성·빌드·타입 검사를 관리합니다. 내부 패키지는 `workspace:*`로 연결하며 잠금 파일은 `pnpm-lock.yaml`입니다. 별도 worker 앱은 없습니다.
+- `pnpm dev`는 `turbo run dev --continue=always`로 client와 server의 `dev` 작업을 함께 실행합니다. 전체 종료는 Ctrl+C입니다. 한 앱의 종료·실패가 다른 앱을 자동으로 중단시키지 않도록 설정했습니다.
+- 각 앱이 자신의 포트와 종료를 담당합니다. `.data/runtime/`의 PID·인스턴스 ID·주소로 상대 앱을 찾습니다. 키나 계정 데이터는 실행 주소 파일에 저장하지 않습니다. 상대 앱을 다시 실행하면 새 주소를 읽어 연결합니다.
+- 선택 실행은 `pnpm --filter @openstudio/client dev` 또는 `pnpm --filter @openstudio/server dev`입니다. Turbo는 종료된 앱을 자동 재시작하지 않습니다. client를 다시 실행해도 기존 server와 작업 루프는 유지됩니다.
+- 제공자 키와 DB 코드는 server에만 있습니다. client는 API를 통해 상태와 결과를 받습니다.
+- `pnpm build`는 Turbo 빌드입니다. client는 Next 빌드, server와 공통 패키지는 타입 검사 후 TS 소스를 `tsx`로 실행합니다.
+
+## 작업 지속·복구
+
+음성·이미지·영상 생성은 먼저 SQLite에 `queued` 상태로 저장한 뒤 server 내부 루프가 처리합니다. 브라우저는 `GET /api/jobs`로 상태만 조회합니다.
+
+- 브라우저 종료·client 재시작과 관계없이 server가 제출·상태 추적·다운로드를 계속합니다.
+- 실행권 만료와 갱신으로 같은 작업의 중복 처리를 방지합니다. 외부 API 호출 중에는 SQLite 쓰기 트랜잭션을 잡고 있지 않습니다.
+- server 시작 시 미완료 작업을 복구합니다. 미제출 대기 작업은 실행하고, 외부 ID가 있는 작업은 기존 생성을 조회하며, 결과 URL이 있으면 다운로드 단계부터 이어갑니다.
+- 제출 의도를 DB에 먼저 기록합니다. 제출 후 응답을 받기 전에 종료됐거나 기존 제출 결과가 불명확하면 `unknown`으로 보존하고 유료 생성을 자동 재제출하지 않습니다.
+- Mac 잠자기·종료 중에는 로컬 처리가 멈추며 앱 재실행 후 복구합니다. 텍스트 호출은 현재 API 요청 안에서 처리하고 성공 결과를 저장합니다.
+
+## 기존 저장 데이터 이전
+
+- 첫 server 시작 시 기존 `.data/<session>.enc`를 복호화해 SQLite로 가져옵니다. 원본 파일은 수정·삭제하지 않고, 이미 이전한 DB 레코드를 원본으로 덮어쓰지 않습니다. 기존 에셋 경로도 유지합니다.
+- 로컬 기본 워크스페이스는 기존 연결이 가장 많은 항목을 우선 선택하고 그 ID를 DB에 고정합니다. 여러 기존 세션은 모두 DB에 보존하며 자동으로 합치지 않습니다.
+- 다른 이전 워크스페이스를 로컬 기본값으로 선택하려면 `OPENSTUDIO_LOCAL_WORKSPACE_ID`에 기존 ID를 지정합니다.
+- `OPENSTUDIO_WORKSPACE_MODE=session`으로 기존 쿠키별 격리를 사용할 수 있습니다. 이는 공유 서비스용 로그인 시스템을 제공하는 것은 아닙니다.
 
 ## ChatGPT 구독 OAuth
 
@@ -136,10 +172,10 @@ TTS는 현재 ElevenLabs API 키를 사용합니다. 보이스 접근 권한과 
 - 영상·fal Queue 작업은 제출 후 외부 작업 ID로 조회하며 페이지를 다시 열어도 추적합니다. 조회 오류로 생성을 다시 제출하지 않습니다.
 - OpenRouter의 동기 이미지 요청 중 서버가 재시작되거나 제출 결과가 불명확하면 **제출 결과 미확인**으로 남기고 자동 재생성하지 않습니다.
 - 생성 요청에는 클라이언트 요청 ID를 사용해 동일 요청의 중복 제출을 막습니다. 의도적으로 새 생성 버튼을 누르는 것은 별도 작업입니다.
-- 결과는 `.data/assets/<session>/`에 저장합니다. 비밀 URL을 브라우저로 넘기지 않고 인증된 `/api/assets`에서 재생·다운로드합니다. 영상은 Range 요청을 지원합니다.
+- 결과는 `.data/assets/<workspace>/`에 저장합니다. 비밀 URL을 브라우저로 넘기지 않고 워크스페이스 범위를 확인하는 `/api/assets`에서 재생·다운로드합니다. 영상은 Range 요청을 지원합니다.
 - 참조 이미지는 PNG/JPEG/WebP/GIF, 장당 20MB·최대 3장입니다. OpenRouter 영상은 현재 시작 프레임 한 장을 지원합니다. 생성 결과는 이미지 20MB, 영상 200MB, 최대 10개입니다.
 - SVG/AVIF 등 현재 저장 어댑터가 지원하지 않는 결과 형식은 성공으로 처리하지 않습니다.
-- 단일 프로세스 로컬 검증용이며 외부 작업 조회는 화면이 열린 동안 진행됩니다. 브라우저를 닫아도 제공자의 생성 작업은 계속되며 재접속하면 조회를 재개합니다.
+- 외부 작업 조회·파일 저장은 server 내부 작업 루프가 수행합니다. 브라우저를 닫아도 server가 실행 중이면 계속 처리합니다.
 
 ### Seedance 요구 버전
 
@@ -160,20 +196,21 @@ TTS는 현재 ElevenLabs API 키를 사용합니다. 보이스 접근 권한과 
 
 ## 데이터와 운영
 
-- 인증 정보는 `.data/*.enc`에 AES-256-GCM으로 암호화합니다.
-- 생성 파일은 owner-only 권한으로 세션별 파일 저장소에 저장합니다. 인증 정보와 작업 메타데이터는 암호화되며 미디어 파일 자체는 암호화되지 않습니다.
-- HttpOnly/SameSite=Lax 쿠키로 브라우저 세션을 격리합니다. Lax는 OpenAI의 top-level callback을 받기 위해 사용합니다.
+- SQLite는 WAL·busy timeout·동기 커밋을 사용합니다. 계정과 작업 본문은 AES-256-GCM으로 암호화하며, 작업 인덱스에는 ID·상태·다음 처리 시각·실행권만 저장합니다.
+- 생성 파일은 owner-only 권한으로 워크스페이스별 파일 저장소에 저장합니다. 미디어 파일 자체는 암호화되지 않습니다.
+- 로컬 모드는 이 머신의 단일 워크스페이스입니다. session 모드에서는 HttpOnly/SameSite=Lax 쿠키로 브라우저 세션을 격리합니다.
 - 브라우저 저장소·응답·로그에 토큰을 넣지 않습니다.
-- 세션 쿠키는 30일간 유효합니다. 쿠키를 삭제하면 해당 브라우저의 저장 계정에 접근할 수 없습니다.
-- 파일 저장과 잠금은 단일 프로세스 검증용입니다. 공유 서비스 배포에는 사용자 로그인·DB·분산 잠금·만료 데이터 정리가 필요합니다.
-- `npm run build && npm start`로 로컬 프로덕션 빌드를 실행합니다. 이 경우 `OPENSTUDIO_ENCRYPTION_KEY`에 32바이트 hex 키가 필요합니다. 실행 포트 범위와 API 프록시는 개발 환경과 같습니다.
+- session 모드의 쿠키는 30일간 유효합니다. 로컬 모드의 워크스페이스 ID는 브라우저 쿠키와 별도로 DB에 보관합니다.
+- 한 데이터 디렉터리에는 server 한 개만 실행합니다. SQLite 파일은 같은 머신의 로컬 디스크에서 사용합니다. 공유 서비스 배포의 로그인·분산 실행·만료 데이터 정리는 후속 범위입니다.
+- 백업은 server 종료 후 `.data/` 전체(DB·키·assets·기존 원본)를 함께 보관합니다. 실행 중인 SQLite의 DB 파일 하나만 복사하지 않습니다.
+- `pnpm build && pnpm start`로 로컬 프로덕션 빌드를 실행합니다. `pnpm start`도 Turbo가 두 앱의 `start` 작업을 함께 실행합니다. 이 경우 `OPENSTUDIO_ENCRYPTION_KEY`에 32바이트 hex 키가 필요합니다. 실행 포트 범위와 API 프록시는 개발 환경과 같습니다.
 
 ## 확인 명령
 
 ```sh
-npm run typecheck
-npm test
-npm run build
+pnpm typecheck
+pnpm test
+pnpm build
 ```
 
 자동화 테스트는 모의 HTTP 및 테스트용 서명 키로 인증 상태·계정 격리·갱신·SSE 완료 조건을 검증합니다. 실제 제공자 연결 결과는 [docs/connections.md](docs/connections.md)에 따로 기록합니다.

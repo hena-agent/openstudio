@@ -55,14 +55,20 @@ models.dev를 기본 정보 소스로 사용하고 제공자 API와 자체 명�
 
 ## 개발 및 검증
 
+- pnpm workspace + Turborepo: `apps/client`(Next.js), `apps/server`(API·제공자·내부 작업 루프), `packages/shared`(공개 타입·모델 정보), `packages/database`(SQLite). 패키지 매니저는 루트 `packageManager`에 고정하고 내부 의존성에는 `workspace:*`를 사용한다.
+- client에서 server·database 코드나 비밀값을 import하지 않는다. 별도 worker 프로세스는 현재 도입하지 않는다.
+- 저장소 루트 `.data/studio.sqlite`에 암호화 레코드와 영속 작업 인덱스를 저장한다. WAL과 짧은 트랜잭션을 사용하고 외부 API 호출 중 DB 트랜잭션을 유지하지 않는다.
+- 작업 실행·제공자 polling·결과 저장은 server가 담당하며 브라우저 요청에 의존하지 않는다. 재시작 시 기존 외부 ID로 복구하고 불명확한 제출은 자동으로 다시 실행하지 않는다.
+- 기본 `local` 모드는 브라우저와 무관한 고정 워크스페이스다. `session` 모드의 계정 격리를 유지한다. 기존 `.enc`와 에셋은 이전 후에도 원본을 보존한다.
+
 검증에 필요한 최소한의 코드부터 작성하고 확인되지 않은 연동 위에 큰 추상화를 만들지 않는다.
 인증·계정 격리·오류 상태 전이에는 의미 있는 테스트를 작성한다.
 자동화 테스트와 실제 제공자 검증 결과는 따로 기록한다.
 
-- `npm run dev`: 프런트 3001–3999, 백엔드 4001–4999의 임의 빈 포트에 loopback 바인딩. 3000번을 사용하지 않는다.
-- `npm run typecheck`: 타입 검사
-- `npm test`: 서버 인증·제공자 테스트
-- `npm run build`: 프로덕션 빌드
+- `pnpm dev`: Turbo TUI가 client·server를 함께 실행한다. 앱이 각각 프런트 3001–3999, 백엔드 4001–4999의 임의 빈 포트에 loopback 바인딩하고 `.data/runtime/`로 실행 주소만 공유한다. 3000번을 사용하지 않는다.
+- `pnpm typecheck`: 타입 검사
+- `pnpm test`: 서버 인증·제공자 테스트
+- `pnpm build`: 프로덕션 빌드
 
 사용자 지시 없이 커밋하거나 푸시하지 않는다.
 

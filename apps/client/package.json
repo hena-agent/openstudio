@@ -1,0 +1,19 @@
+{
+  "name": "@openstudio/client",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx src/serve.ts",
+    "start": "tsx src/serve.ts --production",
+    "build": "next build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@openstudio/shared": "workspace:*",
+    "next": "^16.0.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "lucide-react": "^0.468.0",
+    "tsx": "^4.21.0"
+  }
+}
