@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { Model } from "../types";
 import { AppError, type StoredConnection } from "./storage";
 import { accountMetadata } from "./model-metadata";
+import { discoverAdditional, invokeAdditional } from "./additional-providers";
 
 export const githubHeaders = {
   Accept: "application/json",
@@ -13,10 +14,10 @@ const remoteModel = z.object({
   model_picker_enabled: z.boolean().optional(), policy: z.object({ state: z.string().optional() }).optional(),
 });
 
-export async function requestJSON(url: string, init: RequestInit = {}) {
+export async function requestJSON(url: string, init: RequestInit = {}, timeoutMs = 45_000) {
   let response: Response;
   try {
-    response = await fetch(url, { ...init, redirect: "error", signal: AbortSignal.timeout(45_000), cache: "no-store" });
+    response = await fetch(url, { ...init, redirect: "error", signal: AbortSignal.timeout(timeoutMs), cache: "no-store" });
   } catch {
     throw new AppError("제공자에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.", 502, "provider_unreachable");
   }
@@ -26,7 +27,7 @@ export async function requestJSON(url: string, init: RequestInit = {}) {
     }
     const code = response.status === 401 ? "authentication_failed" : response.status === 403 ? "permission_denied" : response.status === 429 ? "rate_limited" : "provider_error";
     const message = response.status === 401 ? "인증이 만료되었거나 키가 유효하지 않습니다. 다시 연결해 주세요." : response.status === 403 ? "이 계정 또는 OAuth 앱에 모델 사용 권한이 없습니다." : response.status === 429 ? "제공자의 사용량 또는 요청 한도를 초과했습니다." : `제공자가 요청을 거절했습니다 (HTTP ${response.status}).`;
-    throw new AppError(message, 502, code);
+    throw new AppError(message, 502, code, response.status);
   }
   try { return await response.json(); }
   catch { throw new AppError("제공자의 응답 형식을 확인할 수 없습니다.", 502, "invalid_response"); }
@@ -60,6 +61,7 @@ export function providerHeaders(connection: Pick<StoredConnection, "provider" | 
 }
 
 export async function discover(connection: Pick<StoredConnection, "provider" | "secret" | "baseURL"> & Partial<Pick<StoredConnection, "method">>): Promise<Model[]> {
+  if (!["openai", "github-copilot"].includes(connection.provider)) return discoverAdditional(connection as StoredConnection);
   const payload = await requestJSON(`${connection.baseURL}/models`, { headers: providerHeaders(connection) });
   if (connection.provider === "openai" && connection.method === "oauth") {
     const response = z.object({ models: z.array(z.object({ slug: z.string(), display_name: z.string(), visibility: z.string() }).passthrough()) }).parse(payload);
@@ -91,6 +93,8 @@ export function inferenceEndpoint(model: Model, provider: StoredConnection["prov
 }
 
 export async function invoke(connection: StoredConnection, model: Model, prompt: string) {
+  if (model.tasks && !model.tasks.includes("text")) throw new AppError("이 모델은 텍스트 작업 대신 이미지·영상 작업에서 실행하세요.");
+  if (!["openai", "github-copilot"].includes(connection.provider)) return invokeAdditional(connection, model, prompt);
   const endpoint = inferenceEndpoint(model, connection.provider);
   if (connection.provider === "openai" && connection.method === "oauth") return invokePlan(connection, model, prompt);
   const body = endpoint === "/responses"

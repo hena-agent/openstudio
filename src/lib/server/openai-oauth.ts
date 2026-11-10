@@ -43,12 +43,13 @@ function publicAttempt(attempt: OpenAIAttempt, authorizationUrl?: string) {
   return { id: attempt.id, status: attempt.status, expiresAt: attempt.expiresAt, error: attempt.error, connectionId: attempt.connectionId, authorizationUrl };
 }
 
-export async function startOpenAI(sessionId: string, connectionId?: string) {
+export async function startOpenAI(sessionId: string, connectionId?: string, callbackHost?: "localhost") {
   const config = await openaiConfiguration();
   const backend = new URL(process.env.OPENSTUDIO_BACKEND_ORIGIN || "http://127.0.0.1:4001");
   if (backend.protocol !== "http:" || backend.hostname !== "127.0.0.1" || Number(backend.port) < 4001 || Number(backend.port) > 4999) {
     throw new AppError("ChatGPT 직접 등록은 127.0.0.1의 4xxx 백엔드에서 시작해야 합니다.", 503, "loopback_required");
   }
+  if (callbackHost) backend.hostname = callbackHost;
   const host = await hostId();
   return transaction(sessionId, (data) => {
     const account = connectionId ? data.connections.find((item) => item.id === connectionId && item.provider === "openai" && item.method === "oauth") : undefined;

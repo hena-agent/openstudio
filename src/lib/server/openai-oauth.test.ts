@@ -50,6 +50,16 @@ async function begin() {
 }
 
 describe("ChatGPT dynamic OAuth", () => {
+  it("keeps localhost through authorization and token exchange", async () => {
+    const result = await startOpenAI(alice, undefined, "localhost"), url = new URL(result.authorizationUrl!);
+    const redirect = "http://localhost:4567/auth/callback";
+    expect(url.searchParams.get("redirect_uri")).toBe(redirect);
+    tokenReply = { access_token: "secret-access", refresh_token: "secret-refresh", id_token: await jwt(url.searchParams.get("nonce")!), expires_in: 3600, scope, token_type: "Bearer" };
+    const callback = new URL(redirect); callback.search = new URLSearchParams({ state: url.searchParams.get("state")!, code: "private-code", client_id: client }).toString();
+    expect((await completeOpenAI(alice, callback)).ok).toBe(true);
+    const exchange = fetchMock.mock.calls.find(([url]) => String(url).includes("oauth/token"));
+    expect(new URLSearchParams((exchange as unknown as [string, RequestInit])[1].body as string).get("redirect_uri")).toBe(redirect);
+  });
   it("registers OpenStudio itself with PKCE, a stable host, and the actual 4xxx callback", async () => {
     const first = await begin();
     const next = new URL((await startOpenAI(alice)).authorizationUrl!);

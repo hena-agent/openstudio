@@ -2,10 +2,10 @@ import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from "node:
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import type { Connection, DeviceAuthorization } from "../types";
+import type { Asset, Connection, DeviceAuthorization, MediaJob, RegisteredModel } from "../types";
 
 export class AppError extends Error {
-  constructor(message: string, public status = 400, public code = "invalid_request") {
+  constructor(message: string, public status = 400, public code = "invalid_request", public upstreamStatus?: number) {
     super(message);
   }
 }
@@ -21,14 +21,22 @@ export type OpenAIAttempt = {
   status: "pending" | "connected" | "failed" | "cancelled";
   error?: string;
 };
+export type OpenRouterAttempt = { id: string; state: string; verifier: string; expiresAt: number; consumed?: boolean; status: "pending" | "connected" | "failed" | "cancelled"; error?: string; connectionId?: string; exchangedKey?: string };
+export type StoredJob = MediaJob & {
+  runId: string; requestId: string; options: Record<string, unknown>; referenceIds: string[];
+  modelSnapshot?: Connection["models"][number];
+  providerBaseURL?: string;
+  statusUrl?: string; resultUrl?: string; pendingOutputs?: { url?: string; base64?: string; mime?: string }[];
+};
 export type PendingDevice = DeviceAuthorization & {
   deviceCode: string;
   nextPollAt: number;
   processing?: boolean;
   accessToken?: string;
 };
-export type Workspace = { connections: StoredConnection[]; pending: PendingDevice[]; openaiAttempts?: OpenAIAttempt[] };
-const root = () => process.env.OPENSTUDIO_DATA_DIR || path.join(process.cwd(), ".data");
+export type Workspace = { connections: StoredConnection[]; pending: PendingDevice[]; openaiAttempts?: OpenAIAttempt[]; routerAttempts?: OpenRouterAttempt[]; assets?: Asset[]; jobs?: StoredJob[]; registeredModels?: RegisteredModel[]; textRuns?: { id: string; model: string; prompt: string; text: string; createdAt: string }[] };
+export const dataRoot = () => process.env.OPENSTUDIO_DATA_DIR || path.join(process.cwd(), ".data");
+const root = dataRoot;
 
 export async function initializeStorage(local: boolean) {
   if (process.env.OPENSTUDIO_ENCRYPTION_KEY) { encryptionKey(); return; }
@@ -100,6 +108,6 @@ export async function transaction<T>(id: string, work: (data: Workspace) => T | 
 }
 
 export function publicConnection(connection: StoredConnection): Connection {
-  const { id, provider, label, method, createdAt, verifiedAt, models, modelsCheckedAt, status, planEnabled } = connection;
-  return { id, provider, label, method, createdAt, verifiedAt, models, modelsCheckedAt, status, planEnabled };
+  const { id, provider, label, method, createdAt, verifiedAt, models, modelsCheckedAt, status, planEnabled, credentialVerifiedAt, connectionIssue, modelSource, byteplus, fal } = connection;
+  return { id, provider, label, method, createdAt, verifiedAt, models, modelsCheckedAt, status, planEnabled, credentialVerifiedAt, connectionIssue, modelSource, byteplus, fal };
 }

@@ -1,4 +1,27 @@
-export type ProviderId = "github-copilot" | "openai";
+export type ProviderId = "github-copilot" | "openai" | "anthropic" | "google" | "openrouter" | "fal" | "byteplus" | "xai" | "deepseek" | "groq" | "mistral" | "elevenlabs";
+export type BytePlusRegistration = { id: string; kind: "text" | "image" | "video"; name?: string; baseModelId?: string };
+export type BytePlusSettings = { region: "ap-southeast-1"; registrations: BytePlusRegistration[] };
+export type FalSettings = { endpoints: string[] };
+export type FalCatalogPage = { models: Model[]; nextCursor?: string; hasMore: boolean; source: "public-catalog" };
+export type TaskKind = "text" | "audio" | "image" | "video";
+export type RegisteredModel = { id: string; connectionId: string; modelId: string; name: string; kind: TaskKind; createdAt: string };
+export type Voice = { id: string; name: string };
+export type MediaCapabilities = {
+  kind: "image" | "video";
+  aspectRatios?: string[];
+  resolutions?: string[];
+  durations?: number[];
+  parameters?: Record<string, { type: string; values?: (string | number)[]; min?: number; max?: number }>;
+  reference?: "none" | "optional" | "required";
+  referenceField?: string;
+  referenceArray?: boolean;
+  maxReferences?: number;
+  generateAudio?: boolean;
+  seed?: boolean;
+  inputSchema?: Record<string, unknown>;
+  acceptsPrompt?: boolean;
+  pricing?: { unit: string; amount: number; currency: string; label?: string }[];
+};
 export type TokenPricing = {
   input?: number;
   output?: number;
@@ -30,6 +53,12 @@ export type Model = {
   callable?: boolean;
   metadata?: ModelMetadata;
   metadataUpdatedAt?: string;
+  metadataSource?: "account" | "provider-catalog";
+  tasks?: TaskKind[];
+  media?: MediaCapabilities;
+  speech?: { maxCharacters?: number };
+  unavailableReason?: string;
+  registration?: { baseModelId?: string; mappingVerified: boolean };
 };
 export type Connection = {
   id: string;
@@ -42,6 +71,20 @@ export type Connection = {
   modelsCheckedAt?: string;
   status?: "connected" | "disconnected";
   planEnabled?: boolean;
+  credentialVerifiedAt?: string;
+  connectionIssue?: { kind: "authentication" | "permission" | "temporary"; message: string; checkedAt: string };
+  modelSource?: "account" | "public-catalog";
+  byteplus?: BytePlusSettings;
+  fal?: FalSettings;
+};
+export type Asset = { id: string; name: string; mime: string; size: number; createdAt: string; kind: "image" | "video" | "audio"; };
+export type MediaJob = {
+  id: string; connectionId: string; provider: ProviderId; model: string; modelName: string;
+  kind: "image" | "video" | "audio"; prompt: string;
+  status: "submitting" | "pending" | "running" | "downloading" | "completed" | "failed" | "unknown";
+  createdAt: string; updatedAt: string; externalId?: string;
+  assets: Asset[]; error?: string; nextPollAt?: number;
+  warning?: string;
 };
 export type CatalogModel = {
   id: string;

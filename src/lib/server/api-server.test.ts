@@ -19,6 +19,17 @@ function request(body: unknown, session = id) {
   return new Request("http://127.0.0.1:4567/api/connections", { method: "POST", headers: { Origin: "http://127.0.0.1:3456", Cookie: `studio_session=${session}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
 }
 describe("backend application routes", () => {
+  it.each([[401, "authentication"], [403, "permission"], [503, "temporary"]])("persists HTTP %s connection failures and clears them after a successful recheck", async (status, kind) => {
+    await transaction(id, (data) => data.connections.push({ id: connectionId, provider: "openai", label: "account", method: "api-key", createdAt: "now", secret: "old-secret", baseURL: "https://api.openai.com/v1", models: [{ id: "old-model", name: "Old model", endpoints: [] }], modelsCheckedAt: "2026-11-10T00:00:00Z" }));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(Response.json({}, { status: Number(status) })).mockResolvedValueOnce(Response.json({ data: [{ id: "new-model" }] })));
+    expect((await dispatch(request({ action: "models", id: connectionId }))).status).toBe(502);
+    const failed = await transaction(id, (data) => data.connections[0]);
+    expect(failed.connectionIssue?.kind).toBe(kind); expect(failed.models[0].id).toBe("old-model"); expect(failed.secret).toBe("old-secret");
+    const response = await dispatch(new Request("http://127.0.0.1:4567/api/connections", { headers: { Cookie: `studio_session=${id}` } }));
+    expect((await response.json()).connections[0].connectionIssue.kind).toBe(kind);
+    expect((await dispatch(request({ action: "models", id: connectionId }))).status).toBe(200);
+    const recovered = await transaction(id, (data) => data.connections[0]); expect(recovered.connectionIssue).toBeUndefined(); expect(recovered.credentialVerifiedAt).toBeTruthy(); expect(recovered.verifiedAt).toBeUndefined();
+  });
   it("requires explicit generation consent before calling any provider", async () => {
     const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
     const response = await dispatch(request({ action: "invoke", id: connectionId, model: "model", prompt: "test", consent: false }));
@@ -61,5 +72,15 @@ describe("backend application routes", () => {
     const connection = await transaction(id, (data) => data.connections[0]);
     expect(connection.secret).toBe("new-access");
     expect(connection.refreshToken).toBe("new-refresh");
+  });
+  it("validates replacement API keys before updating an existing account", async () => {
+    await transaction(id, (data) => data.connections.push({ id: connectionId, provider: "openai", method: "api-key", label: "account", createdAt: "now", secret: "old-secret", baseURL: "https://api.openai.com/v1", models: [] }));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(Response.json({}, { status: 401 })).mockResolvedValueOnce(Response.json({ data: [{ id: "new-model" }] })));
+    expect((await dispatch(request({ action: "update-key", id: connectionId, key: "invalid-new-secret" }))).status).toBe(502);
+    expect(await transaction(id, (data) => data.connections[0].secret)).toBe("old-secret");
+    expect(await transaction(id, (data) => data.connections[0].connectionIssue)).toBeUndefined();
+    expect((await dispatch(request({ action: "update-key", id: connectionId, key: "valid-new-secret" }))).status).toBe(200);
+    expect(await transaction(id, (data) => data.connections[0].secret)).toBe("valid-new-secret");
+    expect(await transaction(id, (data) => data.connections[0].id)).toBe(connectionId);
   });
 });

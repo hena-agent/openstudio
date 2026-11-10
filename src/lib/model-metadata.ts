@@ -1,6 +1,6 @@
 import type { Catalog, CatalogModel, Model, ModelMetadata } from "./types";
 
-export type MetadataSource = "provider" | "catalog";
+export type MetadataSource = "provider" | "provider-catalog" | "catalog";
 export type ResolvedMetadata = {
   values: ModelMetadata;
   sources: Partial<Record<keyof ModelMetadata, MetadataSource>>;
@@ -16,7 +16,7 @@ export function resolveModelMetadata(model: Model, providerId: string, catalog?:
   }
   const values: ModelMetadata = {};
   const sources: ResolvedMetadata["sources"] = {};
-  for (const [source, metadata] of [["catalog", reference?.metadata], ["provider", model.metadata]] as const) {
+  for (const [source, metadata] of [["catalog", reference?.metadata], [model.metadataSource === "provider-catalog" ? "provider-catalog" : "provider", model.metadata]] as const) {
     for (const [field, value] of Object.entries(metadata || {})) {
       if (value === undefined || (Array.isArray(value) && !value.length)) continue;
       // Assign only known metadata fields; preserve explicit false and zero prices.
