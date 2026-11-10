@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "OpenStudio · 연결 작업 공간",
-  description: "영상 워크플로우를 위한 계정 연결, 모델 선택 및 실제 호출 검증.",
+  title: "OpenStudio · 모델 작업 공간",
+  description: "텍스트·음성·이미지·영상 모델을 연결하고 실행하는 영상 제작 작업 공간.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
