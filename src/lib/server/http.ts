@@ -12,10 +12,17 @@ export function sessionCookie(id: string) {
   return `studio_session=${id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000${secure}`;
 }
 
-export function sameOrigin(request: Request) {
+export function frontendOrigin(request: Request) {
   const expected = process.env.OPENSTUDIO_FRONTEND_ORIGIN || new URL(request.url).origin;
-  if (request.headers.get("origin") !== expected) throw new AppError("허용되지 않은 요청 출처입니다.", 403, "invalid_origin");
+  const configured = new URL(expected), allowed = new Set([configured.origin]);
+  if (configured.protocol === "http:" && ["127.0.0.1", "localhost"].includes(configured.hostname)) {
+    const alias = new URL(configured); alias.hostname = configured.hostname === "localhost" ? "127.0.0.1" : "localhost"; allowed.add(alias.origin);
+  }
+  const origin = request.headers.get("origin");
+  if (!origin || !allowed.has(origin)) throw new AppError("허용되지 않은 요청 출처입니다.", 403, "invalid_origin");
+  return new URL(origin);
 }
+export function sameOrigin(request: Request) { frontendOrigin(request); }
 
 export function errorResponse(error: unknown) {
   const known = error instanceof AppError;
@@ -25,13 +32,13 @@ export function errorResponse(error: unknown) {
   }, { status: known ? error.status : error instanceof ZodError ? 400 : 500, headers: { "Cache-Control": "no-store" } });
 }
 
-export function route(handler: (request: Request, sessionId: string) => Promise<unknown>, mutation = false) {
+export function route(handler: (request: Request, sessionId: string) => Promise<unknown>, mutation = false, withSession = true) {
   return async (request: Request) => {
     try {
       if (mutation) sameOrigin(request);
-      const id = readSession(request) || randomBytes(32).toString("hex");
+      const id = withSession ? readSession(request) || randomBytes(32).toString("hex") : "";
       const data = await handler(request, id);
-      return Response.json(data, { headers: { "Cache-Control": "no-store", "Set-Cookie": sessionCookie(id) } });
+      return Response.json(data, { headers: { "Cache-Control": "no-store", ...(withSession ? { "Set-Cookie": sessionCookie(id) } : {}) } });
     } catch (error) { return errorResponse(error); }
   };
 }

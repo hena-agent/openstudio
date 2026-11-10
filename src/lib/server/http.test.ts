@@ -1,8 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { route, readSession, sessionCookie } from "./http";
 
-afterEach(() => vi.resetAllMocks());
+afterEach(() => { vi.resetAllMocks(); vi.unstubAllEnvs(); });
 describe("API boundary", () => {
+  it("accepts only the configured frontend port on localhost and 127.0.0.1", async () => {
+    vi.stubEnv("OPENSTUDIO_FRONTEND_ORIGIN", "http://127.0.0.1:3456");
+    const handler = vi.fn().mockResolvedValue({ ok: true }), post = route(handler, true);
+    for (const origin of ["http://localhost:3456", "http://127.0.0.1:3456"]) expect((await post(new Request("http://127.0.0.1:4567/api", { method: "POST", headers: { Origin: origin } }))).status).toBe(200);
+    for (const origin of ["http://localhost:3457", "http://localhost.evil.test:3456", "http://127.0.0.2:3456", "https://localhost:3456", "null"]) expect((await post(new Request("http://127.0.0.1:4567/api", { method: "POST", headers: { Origin: origin } }))).status).toBe(403);
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+  it("does not add loopback aliases to a deployed non-loopback origin", async () => {
+    vi.stubEnv("OPENSTUDIO_FRONTEND_ORIGIN", "https://studio.example.test");
+    const post = route(async () => ({}), true);
+    expect((await post(new Request("https://studio.example.test/api", { method: "POST", headers: { Origin: "http://localhost" } }))).status).toBe(403);
+  });
   it("blocks missing and cross-site Origin before running a mutation", async () => {
     const handler = vi.fn().mockResolvedValue({ ok: true });
     const post = route(handler, true);

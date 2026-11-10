@@ -1,5 +1,46 @@
 # 연결 검증 기록
 
+## 2026-11-10 연결 상태 피드백·localhost
+
+- 연결 카드와 계정 목록에 상태 배지를 항상 표시하고 인증 확인·모델 개수·확인 시각·실제 실행 확인을 펼쳤습니다. 연결된 제공자를 먼저 보여주며 완료 메시지와 모델 선택 동선을 제공합니다.
+- 모델 조회 등 기존 인증을 사용하는 요청의 실패를 계정에 저장합니다. 401은 재인증, 403은 권한, 일시적인 실패는 재확인 실패로 구분하고 마지막 정상 모델 목록은 보존합니다. 잘못된 교체 키는 기존 정상 인증 상태를 덮어쓰지 않습니다.
+- localhost와 127.0.0.1을 같은 프런트 포트에서 지원하며 IPv4·IPv6 loopback을 함께 바인딩합니다. API Origin은 설정된 포트의 두 호스트만 허용합니다. 외부 출처·다른 포트는 거부합니다.
+- OpenAI·OpenRouter OAuth 콜백은 시작한 브라우저 호스트를 유지합니다. 두 호스트의 쿠키 저장소는 별개입니다. 실제 제공자 로그인 승인은 자동 실행하지 않았습니다.
+- 타입 검사와 112개 테스트에서 상태 분류·오류 저장/복구, IPv4/IPv6 접속·포트 충돌 정리, Origin 제한, localhost OAuth 콜백·토큰 교환을 확인했습니다. 제공자 응답은 테스트용 모의 응답입니다.
+- 프로덕션 빌드와 diff 공백 검사 통과. 실제 localhost/127.0.0.1 브라우저에서 API 요청·OpenRouter OAuth 시작/취소·호스트별 콜백 URL을 확인했습니다. 제공자 승인·키 교환은 실행하지 않았습니다. 두 호스트의 HMR WebSocket 연결과 콘솔 오류 없음도 확인했습니다.
+- 모의 연결 응답으로 완료 메시지·모델 200개 표시·연결된 제공자 우선 정렬·일시적 실패·재인증 필요·정상 재확인 복구를 검증했습니다. 320px/390px에서 가로 넘침이 없었습니다. 실제 fal 계정의 유료 실행 검증은 아닙니다.
+
+## 2026-11-10 프로바이더 연결 우선으로 수정
+
+- 현재 흐름은 **프로바이더 연결 → 작업 유형 → 연결 계정 → 모델 선택 → 실행**입니다. 아래의 이전 모델 등록·직접 endpoint 등록 UI 기록은 과거 구현 이력입니다.
+- 별도의 모델 등록 화면과 등록/삭제 API를 제거했습니다. 기존 계정·인증·작업 데이터는 유지합니다.
+- fal.ai·BytePlus 연결 폼은 API 키와 연결 이름을 받습니다. 모델 ID·URL을 입력하는 UI는 제공하지 않습니다.
+- fal.ai 전체 검색은 연결 계정의 키로 조회하며 반환 모델을 계정 모델 캐시에 반영합니다. 검색 결과 선택 후 같은 실행 어댑터로 호출합니다. 이 캐시는 별도 사용자 모델 등록 목록이 아닙니다.
+- 계정 API와 공개 목록의 차이, 실제 실행 권한은 기존과 같이 구분합니다. 이번 수정에서 외부 유료 생성은 실행하지 않았습니다.
+- 자동화 테스트: 키만으로 BytePlus 연결·조회, fal.ai 인증 검색·cursor·중복 캐시·계정 격리, 모델 등록 없이 텍스트 실행과 기록 격리를 검증했습니다.
+- 타입 검사·101개 테스트·프로덕션 빌드·diff 공백 검사가 통과했습니다.
+- 브라우저: 실제 연결 폼에서 fal.ai·BytePlus가 연결 이름/API 키 두 입력만 받는 것을 확인했습니다. 모의 응답으로 키 연결 → 계정 선택 → 모델 선택, fal.ai 검색 결과의 직접 선택, BytePlus 계정별 목록 분리, 음성 모델 선택을 확인했고 모델 등록 API 요청은 없었습니다. 320px·390px 레이아웃과 콘솔 오류 없음도 확인했습니다. 실제 유료 생성 검증과는 별개입니다.
+
+## 2026-11-10 모델 중심 화면·ElevenLabs TTS
+
+- 모델 등록은 세션별 암호화 Workspace에 연결 ID·모델 ID·유형을 참조해 저장합니다. 인증 정보는 기존 계정에만 저장합니다.
+- 유형별 등록 목록, 단일 모델 추가 흐름, 설정 안의 연결 계정 관리, 별도 작업 기록을 구현했습니다. 모델 목록 갱신 시 등록 ID를 변경하지 않습니다.
+- ElevenLabs는 `xi-api-key` 헤더로 `/v1/models`를 조회하고 TTS 가능 모델만 제공합니다. `/v2/voices`의 검색·페이지 토큰을 지원합니다.
+- 생성은 `POST /v1/text-to-speech/{voice_id}?output_format=mp3_44100_128`입니다. 모델·보이스·원고를 작업에 남기고 MP3를 세션별로 저장합니다.
+- 동일 요청 ID는 재제출하지 않습니다. 인증·권한·한도 오류를 구분하고 네트워크/5xx의 불명확한 제출은 `unknown`으로 보존합니다.
+- **실제 계정 검증:** ElevenLabs API 키·보이스 권한·유료 생성은 미검증입니다. 모델 조회와 생성의 자동화 테스트는 모의 응답입니다.
+- **자동화 검증:** 타입 검사·100개 테스트·프로덕션 빌드·diff 공백 검사를 통과했습니다. 모델 등록의 세션 격리, 계정 참조 재사용, 등록 중복 방지, TTS 동의·오류·불명확 제출·MIME 검사·오디오 Range 접근을 검증했습니다.
+- **브라우저 검증:** 실제 빈 워크스페이스와 계정 연결 폼을 열었습니다. 이어서 브라우저 요청을 모의 처리해 연결 완료 후 등록 복귀, 기존 계정 재사용, 등록 유지, 음성 결과 컨트롤·다운로드 링크, 텍스트·이미지·영상 폼, 별도 작업 기록을 확인했습니다. 모의 MP3는 실제 생성·오디오 디코딩 성공의 증거가 아닙니다. 320px·390px에서 가로 넘침이 없었고 콘솔 오류는 없었습니다.
+- 무작위 포트 중 브라우저가 차단하는 3659·4045를 할당에서 제외했습니다.
+- 재현: 모델 추가 → 음성 → 제공자에서 조회 → ElevenLabs → API 키 연결 → 조회된 TTS 모델 등록 → 보이스 선택 → 원고 입력 → 크레딧 사용 동의 → 음성 생성 → MP3 재생/다운로드.
+- 공식 문서 확인일: 2026-11-10.
+  - https://elevenlabs.io/docs/api-reference/models/list
+  - https://elevenlabs.io/docs/api-reference/voices/search
+  - https://elevenlabs.io/docs/api-reference/text-to-speech/convert
+  - https://developers.openai.com/api/docs/guides/text-to-speech.md — 기존 Speech 모델 종료 예고를 확인했으며 이번 TTS 어댑터에는 포함하지 않았습니다.
+
+아래는 이전 단계의 검증 이력입니다.
+
 확인 날짜: 2026-11-09
 
 ## 현재 결과
@@ -105,3 +146,94 @@ GitHub.com만 지원한다. 토큰 만료 시 재연결한다.
 - 이제 본문의 SSE/JSON 구조와 완료 상태를 검증한다. JSON 오류·HTML·미완료·끊긴 스트림은 성공으로 기록하지 않는다.
 - 사용자가 보고한 실제 실패 응답 본문은 확보하지 못했으므로, 정확한 upstream 원인은 미확인이다. 사용자 재시도로 검증해야 하며 유료 요청을 자동 반복하지 않는다.
 - 수정 후 전체 테스트 50개 통과.
+
+## 제공자·OAuth·미디어 확장 (2026-11-10)
+
+### 구현 범위
+
+- 제공자 레지스트리: OpenAI, OpenRouter, Anthropic, Google, fal, Copilot, xAI, DeepSeek, Groq, Mistral
+- OpenRouter 공식 PKCE: 브라우저 세션/state/S256, 일회성 코드 교환, `/key` 검증, 암호화 저장, 취소·만료 처리. 키 교환 후 계정 확인의 일시 실패는 재교환 없이 재확인한다.
+- Anthropic 모델 페이지네이션·Messages, Google 모델 페이지네이션·generateContent, OpenAI 호환 제공자의 모델 조회·Chat Completions
+- OpenRouter 공개 이미지/영상 명세와 fal 분류별 최신 50개 목록·선택 모델의 OpenAPI 입력 스키마 조회
+- 이미지·영상 요청/결과, 참조 이미지 업로드, 미디어 작업 기록, 결과 파일 저장·재생·다운로드
+- 요청 ID 중복 방지, 외부 작업 ID 유지, 결과 재수집, 재시작 시 불명확한 제출을 자동 재생성하지 않는 상태 처리
+- 파일의 실제 MIME 바이트 확인, 세션 격리, CDN 이동 시 인증 헤더 제거, MP4/WebM Range 요청
+- 기존 API 계정 ID를 유지하는 키 갱신. 진행 작업의 결과 확보 전에 계정을 삭제하지 않는다.
+
+### 실제 확인과 미확인 구분
+
+- **확인:** OpenRouter OAuth 버튼으로 실제 `openrouter.ai` 로그인 진입. 계정 승인은 진행하지 않았다.
+- **확인:** OpenRouter 공개 `/images/models/.../endpoints`, `/videos/models`에서 실제 옵션·과금 단위 조회.
+- **확인:** fal 공개 모델 목록은 인증 없이 HTTP 200이나, 잘못된 키를 전달하면 HTTP 401. 익명 공개 조회를 키 검증 성공으로 취급하지 않는다.
+- **확인:** fal Seedream 5.0 Pro의 실제 OpenAPI를 읽어 입력 스키마의 로컬 검증과 기본값 적용을 확인했다. 생성 API는 호출하지 않았다.
+- **미확인:** 새 제공자의 실제 사용자 키·계정 승인·유료 이미지/영상 생성. 계정·크레딧을 연결한 사용자가 실행 동의 후 검증해야 한다.
+- **자동화:** OAuth·제공자·미디어 파이프라인은 모의 HTTP로 검증한다. 브라우저에서는 모의 계정·생성 응답으로 옵션 조회, 참조 선택, 동의 전 차단, 결과 표시, 새로고침 후 기록 복원, 모바일 가로 넘침 없음과 하위 Seedance 비활성화를 확인했다. 실제 연동 성공 증거와 별개다.
+
+### Seedance 5.0 이상
+
+요청 버전은 5.0 이상으로 유지한다. 현재 조사에서 공식 endpoint를 확인하지 못했다. 하위 버전 모델은 공개 목록에서 실행 불가로 표시하고 서버에서 재검증한다. Seedream 이미지 모델과 혼동하지 않는다.
+
+### 참고 자료
+
+- [OpenRouter OAuth PKCE](https://openrouter.ai/docs/use-cases/oauth-pkce)
+- [OpenRouter 키 확인](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-key)
+- [OpenRouter 이미지 API](https://openrouter.ai/docs/guides/overview/multimodal/image-generation)
+- [OpenRouter 영상 API](https://openrouter.ai/docs/guides/overview/multimodal/video-generation)
+- [fal 모델 검색·OpenAPI 확장](https://fal.ai/docs/platform-apis/v1/models.md)
+- [fal Queue API](https://fal.ai/docs/documentation/model-apis/inference/queue)
+- [Claude API](https://platform.claude.com/docs/en/api/overview)
+- [Claude 구독 인증 조건](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)
+- [Google 모델 API](https://ai.google.dev/api/models)
+
+### 남은 제약
+
+단일 프로세스 로컬 검증 구조이며 외부 작업의 조회·다운로드는 브라우저가 재접속하거나 열린 동안 진행한다. 원격 공유 서비스의 사용자 로그인·DB·분산 워커·용량 정리는 후속 작업이다. 현재 참조 입력은 이미지에 한정하며 영상·오디오 참조와 편집·합성 스텝은 아직 없다.
+
+### 이번 확장 검증 결과
+
+전체 테스트 67개, 타입 검사, 프로덕션 빌드 통과. 런타임에서 제공자 10개 등록과 API health HTTP 200을 확인했다. 최종 재시작 주소는 프런트 3708 / 백엔드 4332이며 실행 시마다 다시 선택된다. 브라우저에서 미디어 옵션의 명시적 레이블, 동의 전 생성 차단, 모의 결과 표시·작업 기록 복원, 하위 Seedance 실행 차단과 390px 가로 넘침 없음을 확인했다. 유료 외부 생성은 실행하지 않았다.
+
+## BytePlus ModelArk 직접 연결 (2026-11-10)
+
+### 확인한 명세
+
+- [Base URL과 인증](https://docs.byteplus.com/en/docs/modelark/base-url-and-authentication): Singapore `https://ark.ap-southeast.bytepluses.com/api/v3`, `Authorization: Bearer <API key>`.
+- [Models API](https://docs.byteplus.com/en/docs/modelark/models-api): 계정에 보이는 기반 모델 버전 목록. `modalities`, `task_type`, `token_limits`, `features`를 사용하며 추론 endpoint 목록으로 일반화하지 않는다.
+- [이미지 API](https://docs.byteplus.com/en/docs/modelark/image-generation-api): `/images/generations`, `image`, `size`, `response_format`, `output_format`, 비스트리밍 결과의 `data`.
+- [영상 제출](https://docs.byteplus.com/en/docs/modelark/create-video-generation-task-api): `/contents/generations/tasks`, `content`, `ratio`, `resolution`, `duration`, 시작·끝 프레임.
+- [영상 조회](https://docs.byteplus.com/en/docs/modelark/get-video-generation-task-api): 작업 ID와 상태, `content.video_url`.
+- [공식 Python SDK 기본 주소](https://github.com/byteplus-sdk/byteplus-python-sdk-v2/blob/master/byteplussdkarkruntime/_constants.py), [인증](https://github.com/byteplus-sdk/byteplus-python-sdk-v2/blob/master/byteplussdkarkruntime/_client.py), [이미지 요청](https://github.com/byteplus-sdk/byteplus-python-sdk-v2/blob/master/byteplussdkarkruntime/resources/images/images.py), [영상 요청](https://github.com/byteplus-sdk/byteplus-python-sdk-v2/blob/master/byteplussdkarkruntime/resources/content_generation/tasks.py), [영상 결과 타입](https://github.com/byteplus-sdk/byteplus-python-sdk-v2/blob/master/byteplussdkarkruntime/types/content_generation/content_generation_task.py).
+
+문서가 JS 로딩 뒤 본문을 표시하므로 브라우저에서 실제 API 본문을 읽어 경로·필드를 확인했다. 다른 리전 URL은 추정해 추가하지 않았다.
+
+### 구현과 검증 상태
+
+- 구현: API 키·리전 설정, 기반 모델 조회/분류, 모델/ep-... ID 직접 등록·수정, 이미지 생성·참조 편집, 영상 제출·조회·파일 저장.
+- 사용자 등록 ID와 기반 모델 매핑은 미확인으로 표시한다. 불투명한 영상 endpoint ID로 Seedance 버전 제한을 우회하지 않는다.
+- 실행에는 당시 모델 설정과 API 주소를 보존하며 새 설정으로 기존 외부 작업을 다른 URL에 조회하지 않는다.
+- 실제 확인: 키 없는 `GET /models`는 HTTP 401 JSON을 반환했다. 이는 인증 성공이나 모델 조회 성공의 증거가 아니다.
+- 자동화 테스트: ModelArk 요청 필드·Bearer 인증, modality 분류와 한도 보존, 지역/ID 주입 거부, ID 치환 방지, 영상 ID/상태 검사, 키·설정 격리, 서명된 이미지/영상 파일 수신 및 기존 작업 재조회. 외부 HTTP는 모의 응답이며 실제 과금 생성은 실행하지 않았다.
+- 차단 요인: 실제 ModelArk API 키, 계정 활성화 모델 또는 콘솔 endpoint 권한·크레딧이 필요하다. 실제 사용자 키로 생성 성공을 확인한 뒤 별도 기록한다.
+- Seedance 5.0 이상의 실제 제공 endpoint는 여전히 미확인이다. Seedream 5.0 이미지 모델과 구분한다.
+
+### 적용 결과
+
+테스트 78개, 타입 검사, 프로덕션 빌드 통과. 프런트 3548 / 백엔드 4429에서 BytePlus 등록과 API health를 확인했다. 실제 연결 폼에서 Singapore 리전·공식 Base URL·ID 입력 규칙을 확인했고, 별도 모의 계정 응답으로 설정 전달·등록 수정·문자열 크기 옵션·390px 모바일 가로 넘침 없음·브라우저 오류 없음을 확인했다. UI 검증용 키는 요청을 가로채 실제 서비스에 보내지 않았으며 유료 생성도 실행하지 않았다.
+
+## fal.ai 연결 보완 (2026-11-10)
+
+기존 Queue 어댑터와 최신 50개 목록에 다음을 추가했다.
+
+- 연결 전 공개 모델 검색·작업 분류·cursor 페이지 조회. 공개 검색에는 앱 쿠키나 인증 키를 전달하지 않는다.
+- API 키 연결 폼과 fal.ai 모델 설정에서 endpoint ID/공식 모델 URL 직접 등록. 조회로 존재를 확인하고 정규화된 호출 ID를 유지한다.
+- 기본 목록 밖의 직접 등록 모델을 계속 조회한다. 잘못된 신규 설정은 저장하지 않고, 기존 설정의 미조회 모델은 실행 불가로 남겨 자동 대체하지 않는다.
+- 입력 명세의 로컬 참조·allOf와 참조 배열 한도 처리, prompt 없는 모델에 prompt를 강제 전송하지 않도록 보완.
+- 기존 Queue 제출·상태 추적·파일 수신 경로 재사용. Seedance 하위 버전 제한을 유지한다.
+
+실제 확인: fal 공개 모델 검색 HTTP 200, 잘못된 Key를 보낸 모델 조회 HTTP 401. 앱의 공개 검색으로 Seedream 5.0 Pro 이미지 endpoint를 찾고 추가했으며 영상 목록 20개→40개 페이지 조회를 확인했다. 카탈로그 조회는 실제 계정 권한·생성 성공의 증거가 아니다.
+
+브라우저에서는 별도 모의 계정으로 키 연결 설정 전달, 모델 URL 정규화, 등록 수정, prompt 없는 모델의 입력 화면, 390px 가로 넘침 없음과 오류 없음을 확인했다. 실제 키나 유료 생성 요청을 자동 전송하지 않았다.
+
+자동화 테스트 87개, 타입 검사·프로덕션 빌드 통과. 참고: [fal 모델 검색 API](https://fal.ai/docs/platform-apis/v1/models.md), [fal Queue API](https://fal.ai/docs/documentation/model-apis/inference/queue).
+
+fal 계정으로 재접속할 때 지원하지 않는 텍스트 탭에 머물지 않고 이미지 작업을 기본 선택하는 것도 확인했다. 적용 서버는 프런트 3437 / 백엔드 4503이며 공개 검색·health 요청은 HTTP 200이다.

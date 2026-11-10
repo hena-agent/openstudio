@@ -15,7 +15,7 @@ async function main() {
   await initializeStorage(dev);
 
   let handler: RequestListener = (_request, response) => { response.writeHead(503).end("Starting OpenStudio…"); };
-  const frontend = createServer((request, response) => {
+  const frontendHandler: RequestListener = (request, response) => {
     if (request.url?.startsWith("/api/") && process.env.OPENSTUDIO_BACKEND_ORIGIN) {
       const upstream = proxyRequest(new URL(request.url, process.env.OPENSTUDIO_BACKEND_ORIGIN), {
         method: request.method, headers: request.headers, timeout: 190_000,
@@ -30,26 +30,36 @@ async function main() {
       return;
     }
     handler(request, response);
+  };
+  const frontend = createServer(frontendHandler);
+  const frontendIPv6 = createServer(frontendHandler);
+  // Next attaches its development WebSocket handler to the primary HTTP server.
+  frontendIPv6.on("upgrade", (request, socket, head) => {
+    if (frontend.listenerCount("upgrade")) frontend.emit("upgrade", request, socket, head);
+    else socket.destroy();
   });
   const backend = createApiServer();
+  const backendIPv6 = createApiServer();
   let app: ReturnType<typeof next> | undefined;
   async function shutdown() {
     frontend.closeAllConnections(); backend.closeAllConnections();
+    frontendIPv6.closeAllConnections(); backendIPv6.closeAllConnections();
     frontend.close(); backend.close();
+    frontendIPv6.close(); backendIPv6.close();
     await app?.close();
   }
   process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));
   process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
 
   try {
-    const backendPort = await listenInRange(backend, 4001, 4999);
-    const frontendPort = await listenInRange(frontend, 3001, 3999);
+    const backendPort = await listenInRange(backend, 4001, 4999, backendIPv6);
+    const frontendPort = await listenInRange(frontend, 3001, 3999, frontendIPv6);
     process.env.OPENSTUDIO_BACKEND_ORIGIN = `http://127.0.0.1:${backendPort}`;
     process.env.OPENSTUDIO_FRONTEND_ORIGIN = `http://127.0.0.1:${frontendPort}`;
     app = next({ dev, hostname: "127.0.0.1", port: frontendPort, httpServer: frontend });
     await app.prepare();
     handler = app.getRequestHandler();
-    console.log(`\nOpenStudio\n  Frontend  ${process.env.OPENSTUDIO_FRONTEND_ORIGIN}\n  Backend   ${process.env.OPENSTUDIO_BACKEND_ORIGIN}\n  OAuth     ${process.env.OPENSTUDIO_BACKEND_ORIGIN}/auth/callback\n`);
+    console.log(`\nOpenStudio\n  Frontend  http://localhost:${frontendPort}\n            ${process.env.OPENSTUDIO_FRONTEND_ORIGIN}\n  Backend   ${process.env.OPENSTUDIO_BACKEND_ORIGIN}\n  OAuth     시작한 호스트의 ${backendPort}번 콜백\n`);
   } catch (error) { await shutdown(); throw error; }
 }
 main().catch(() => { console.error("OpenStudio 시작 실패. 포트 범위, 환경변수와 빌드 상태를 확인하세요."); process.exit(1); });
