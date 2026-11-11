@@ -1,10 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { database, closeDatabases } from "@openstudio/database";
-import { listenInRange } from "../../../scripts/ports";
 import { createApiServer } from "./api-server";
 import { dataRoot, initializeStorage } from "./storage";
 import { startJobRunner } from "./job-runner";
-import { prepareEnvironment, publishRuntime } from "../../../scripts/runtime";
+import { listenOnWorkspacePort, prepareEnvironment, publishRuntime, WorkspacePortError } from "../../../scripts/runtime";
 
 async function main() {
   prepareEnvironment();
@@ -31,11 +30,11 @@ async function main() {
   process.once("SIGINT", () => void stop()); process.once("SIGTERM", () => void stop());
   try {
     await initializeStorage(dev);
-    const port = await listenInRange(server, 4001, 4999, ipv6);
+    const port = await listenOnWorkspacePort("server", server, ipv6);
     const origin = `http://127.0.0.1:${port}`; process.env.OPENSTUDIO_BACKEND_ORIGIN = origin;
     runner = await startJobRunner();
     unpublish = publishRuntime("server", origin);
     console.log(`Server: http://localhost:${port} · ${origin} · SQLite ${process.env.OPENSTUDIO_WORKSPACE_MODE}`);
   } catch (error) { db.releaseServer(owner); throw error; }
 }
-main().catch(() => { console.error("서버 시작 실패. 데이터 디렉터리·암호화 키·실행 중인 서버를 확인하세요."); process.exit(1); });
+main().catch((error) => { console.error(error instanceof WorkspacePortError ? error.message : "서버 시작 실패. 데이터 디렉터리·암호화 키·실행 중인 서버를 확인하세요."); process.exit(1); });

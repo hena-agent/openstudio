@@ -1,7 +1,6 @@
 import { createServer, request as proxyRequest, type RequestListener } from "node:http";
 import next from "next";
-import { listenInRange } from "../../../scripts/ports";
-import { prepareEnvironment, publishRuntime, readRuntime } from "../../../scripts/runtime";
+import { listenOnWorkspacePort, prepareEnvironment, publishRuntime, readRuntime, WorkspacePortError } from "../../../scripts/runtime";
 
 async function main() {
   prepareEnvironment();
@@ -22,9 +21,7 @@ async function main() {
   };
   const server = createServer(serve), ipv6 = createServer(serve);
   ipv6.on("upgrade", (request, socket, head) => { if (server.listenerCount("upgrade")) server.emit("upgrade", request, socket, head); else socket.destroy(); });
-  const requested = Number(process.env.OPENSTUDIO_CLIENT_PORT) || 0;
-  if (requested && (requested < 3001 || requested > 3999)) throw new Error("Client port must be in 3001–3999");
-  const port = await listenInRange(server, requested || 3001, requested || 3999, ipv6);
+  const port = await listenOnWorkspacePort("client", server, ipv6);
   const app = next({ dev, hostname: "127.0.0.1", port, httpServer: server });
   let unpublish: (() => void) | undefined;
   let stopping = false;
@@ -37,4 +34,4 @@ async function main() {
   unpublish = publishRuntime("client", `http://127.0.0.1:${port}`);
   console.log(`Client: http://localhost:${port} · http://127.0.0.1:${port}`);
 }
-main().catch(() => { console.error("클라이언트 시작 실패. 빌드 상태와 3xxx 포트를 확인하세요."); process.exit(1); });
+main().catch((error) => { console.error(error instanceof WorkspacePortError ? error.message : "클라이언트 시작 실패. 빌드 상태와 3xxx 포트를 확인하세요."); process.exit(1); });

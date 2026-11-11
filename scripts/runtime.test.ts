@@ -1,13 +1,62 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createServer } from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { publishRuntime, readRuntime } from "./runtime";
+import { listenOnWorkspacePort, publishRuntime, readRuntime } from "./runtime";
 import { frontendOrigin } from "../apps/server/src/http";
 
 let directory: string;
-beforeEach(async () => { directory = await mkdtemp(path.join(tmpdir(), "studio-runtime-")); vi.stubEnv("OPENSTUDIO_DATA_DIR", directory); });
-afterEach(async () => { vi.unstubAllEnvs(); await rm(directory, { recursive: true, force: true }); });
+const listeners: ReturnType<typeof createServer>[] = [];
+function listener() { const server = createServer(); listeners.push(server); return server; }
+const close = (server: ReturnType<typeof createServer>) => new Promise<void>((resolve) => server.close(() => resolve()));
+beforeEach(async () => { directory = await mkdtemp(path.join(tmpdir(), "studio-runtime-")); vi.stubEnv("OPENSTUDIO_DATA_DIR", directory); vi.stubEnv("OPENSTUDIO_CLIENT_PORT", ""); vi.stubEnv("OPENSTUDIO_SERVER_PORT", ""); });
+afterEach(async () => { await Promise.all(listeners.splice(0).map(close)); vi.unstubAllEnvs(); await rm(directory, { recursive: true, force: true }); });
+describe("workspace port selection", () => {
+  it("persists each app's first port and reuses it after runtime cleanup", async () => {
+    for (const role of ["client", "server"] as const) {
+      const first = listener(), ipv6 = listener(), port = await listenOnWorkspacePort(role, first, ipv6);
+      const clear = publishRuntime(role, `http://127.0.0.1:${port}`);
+      clear(); await Promise.all([close(first), close(ipv6)]);
+      expect(readRuntime(role)).toBeUndefined();
+      expect(JSON.parse(await readFile(path.join(directory, "runtime", `${role}-port.json`), "utf8"))).toEqual({ version: 1, port });
+      expect(await listenOnWorkspacePort(role, listener(), listener())).toBe(port);
+    }
+  });
+  it("does not silently replace a saved port when either loopback listener is occupied", async () => {
+    const first = listener(), port = await listenOnWorkspacePort("server", first);
+    const collision = listener();
+    await expect(listenOnWorkspacePort("server", collision)).rejects.toThrow(`고정 포트 ${port}`);
+    expect(collision.listening).toBe(false);
+    await close(first);
+    const occupied = listener();
+    await new Promise<void>((resolve) => occupied.listen({ port, host: "::1", ipv6Only: true }, resolve));
+    const ipv4 = listener();
+    await expect(listenOnWorkspacePort("server", ipv4, listener())).rejects.toThrow(`고정 포트 ${port}`);
+    expect(ipv4.listening).toBe(false);
+    expect(JSON.parse(await readFile(path.join(directory, "runtime", "server-port.json"), "utf8")).port).toBe(port);
+  });
+  it("adopts a previous runtime port and validates explicit configuration", async () => {
+    const first = listener(), port = await listenOnWorkspacePort("client", first);
+    publishRuntime("client", `http://127.0.0.1:${port}`);
+    await close(first);
+    await rm(path.join(directory, "runtime", "client-port.json"));
+    expect(await listenOnWorkspacePort("client", listener())).toBe(port);
+    for (const value of ["3000", "3659", "3148.5", "invalid", "0"]) {
+      vi.stubEnv("OPENSTUDIO_CLIENT_PORT", value);
+      await expect(listenOnWorkspacePort("client", listener())).rejects.toThrow("정수여야");
+    }
+    vi.stubEnv("OPENSTUDIO_SERVER_PORT", "4045");
+    await expect(listenOnWorkspacePort("server", listener())).rejects.toThrow("정수여야");
+  });
+  it("rejects corrupt saved configuration instead of choosing another port", async () => {
+    const server = listener(); await listenOnWorkspacePort("server", server); await close(server);
+    await writeFile(path.join(directory, "runtime", "server-port.json"), "partial-json");
+    const replacement = listener();
+    await expect(listenOnWorkspacePort("server", replacement)).rejects.toThrow("포트 설정을 확인");
+    expect(replacement.listening).toBe(false);
+  });
+});
 describe("independent app discovery", () => {
   it("publishes only execution metadata and discovers a restarted peer", () => {
     expect(readRuntime("server")).toBeUndefined();

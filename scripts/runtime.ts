@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Server } from "node:http";
+import { listenInRange } from "./ports";
 
 type Role = "client" | "server";
 type Runtime = { version: 1; pid: number; instance: string; origin: string };
@@ -23,6 +25,43 @@ function validOrigin(role: Role, input: string) {
     const url = new URL(input), port = Number(url.port);
     return url.protocol === "http:" && url.hostname === "127.0.0.1" && !url.username && !url.password && !url.search && !url.hash && url.pathname === "/" && port >= (role === "client" ? 3001 : 4001) && port <= (role === "client" ? 3999 : 4999) && ![3659, 4045].includes(port);
   } catch { return false; }
+}
+export class WorkspacePortError extends Error {}
+
+// Pick once per workspace. Runtime discovery is ephemeral; the port choice is not.
+export async function listenOnWorkspacePort(role: Role, server: Server, ipv6?: Server) {
+  const file = path.join(path.dirname(runtimePath(role)), `${role}-port.json`);
+  const requested = process.env[`OPENSTUDIO_${role.toUpperCase()}_PORT`];
+  let saved: number | undefined;
+  try {
+    const record = JSON.parse(readFileSync(file, "utf8"));
+    if (record.version !== 1 || !Number.isInteger(record.port) || !validOrigin(role, `http://127.0.0.1:${record.port}`)) throw new Error("invalid port record");
+    saved = record.port;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new WorkspacePortError(`${role} 포트 설정을 확인하세요: ${file}`);
+  }
+  const previous = storedRuntime(role);
+  const preferred = requested ? Number(requested) : saved ?? (previous ? Number(new URL(previous.origin).port) : undefined);
+  if (preferred !== undefined && (!Number.isInteger(preferred) || !validOrigin(role, `http://127.0.0.1:${preferred}`))) throw new WorkspacePortError(`${role} 포트는 ${role === "client" ? "3001–3999 (3659 제외)" : "4001–4999 (4045 제외)"}의 정수여야 합니다.`);
+  let port: number;
+  try { port = await listenInRange(server, preferred ?? (role === "client" ? 3001 : 4001), preferred ?? (role === "client" ? 3999 : 4999), ipv6); }
+  catch (error) {
+    if (preferred !== undefined) throw new WorkspacePortError(`${role}의 고정 포트 ${preferred}에 바인딩할 수 없습니다. 해당 포트를 사용하는 프로세스를 확인하세요.`);
+    throw error;
+  }
+  try {
+    mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const record = JSON.stringify({ version: 1, port });
+    if (saved === undefined) writeFileSync(file, record, { mode: 0o600, flag: "wx" });
+    else if (saved !== port) {
+      const temporary = `${file}.${randomUUID()}.tmp`;
+      writeFileSync(temporary, record, { mode: 0o600 }); renameSync(temporary, file);
+    }
+  } catch (error) {
+    await Promise.all([server, ipv6].filter((item): item is Server => !!item?.listening).map((item) => new Promise<void>((resolve) => item.close(() => resolve()))));
+    throw error;
+  }
+  return port;
 }
 function storedRuntime(role: Role): Runtime | undefined {
   try {
