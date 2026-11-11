@@ -2,18 +2,21 @@
   "name": "@openstudio/server",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
-    "dev": "tsx src/main.ts",
+    "dev": "tsx watch --clear-screen=false src/main.ts",
     "start": "tsx src/main.ts --production",
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@openstudio/shared": "workspace:*",
+    "@earendil-works/pi-agent-core": "1.5.2",
+    "@earendil-works/pi-ai": "1.5.2",
     "@openstudio/database": "workspace:*",
-    "jose": "^6.1.0",
+    "@openstudio/shared": "workspace:*",
     "ajv": "^8.17.1",
-    "zod": "^4.0.0",
-    "tsx": "^4.21.0"
+    "jose": "^6.1.0",
+    "tsx": "^4.21.0",
+    "zod": "^4.0.0"
   }
 }

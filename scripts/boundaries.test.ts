@@ -14,7 +14,7 @@ describe("browser/server package boundary", () => {
       if (file.endsWith(".test.ts")) continue;
       const source = await readFile(file, "utf8");
       const imports = [...source.matchAll(/(?:from\s+|import\s*\()\s*["']([^"']+)/g)].map((match) => match[1]);
-      expect(imports.filter((item) => /^(node:|@openstudio\/(database|server))/.test(item) || /(?:^|\/)server\//.test(item)), file).toEqual([]);
+      expect(imports.filter((item) => /^(node:|@openstudio\/(database|server)|@earendil-works\/pi-)/.test(item) || /(?:^|\/)server\//.test(item)), file).toEqual([]);
     }
     const client = JSON.parse(await readFile("apps/client/package.json", "utf8"));
     expect(client.dependencies).not.toHaveProperty("@openstudio/database"); expect(client.dependencies).not.toHaveProperty("@openstudio/server");

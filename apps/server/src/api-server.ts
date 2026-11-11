@@ -12,6 +12,7 @@ import { uploadAsset, serveAsset } from "./assets";
 import { completeOpenRouter } from "./openrouter-oauth";
 import * as falModels from "./routes/fal-models";
 import * as models from "./routes/models";
+import * as workflows from "./routes/workflows";
 
 const routes: Record<string, Partial<Record<string, (request: Request) => Promise<Response>>>> = {
   "/api/connections": connections,
@@ -20,6 +21,7 @@ const routes: Record<string, Partial<Record<string, (request: Request) => Promis
   "/api/jobs": jobs,
   "/api/fal/models": falModels,
   "/api/models": models,
+  "/api/workflows": workflows,
 };
 
 const callbackPage = (success: boolean) => `<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenStudio · 계정 연결</title><style>body{background:#111214;color:#e4e4e7;font:15px system-ui;display:grid;place-items:center;min-height:95vh;margin:0}main{max-width:420px;padding:32px}h1{font-size:22px}p{color:#a1a1aa;line-height:1.8}a{color:#b5c9ff}</style><main><p>OPENSTUDIO / CONNECTIONS</p><h1>${success ? "계정 연결이 완료되었습니다." : "계정 연결을 완료하지 못했습니다."}</h1><p>${success ? "이 창을 닫고 작업 화면으로 돌아가세요. 계정의 모델을 조회해 사용할 수 있습니다." : "작업 화면에서 오류 내용을 확인하고 다시 로그인하세요."}</p></main></html>`;

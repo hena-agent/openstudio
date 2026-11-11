@@ -79,6 +79,7 @@ export const POST = route(async (request, sessionId) => {
       return { connection: publicConnection(connection) };
     }
     if (input.action === "disconnect") {
+      if (data.workflowTasks?.some((task) => task.agent.connectionId === connection.id && ["queued", "running"].includes(task.status))) throw new AppError("진행 중인 제작 준비 작업이 끝난 뒤 연결을 해제하세요.", 409, "active_jobs");
       if (data.jobs?.some((job) => job.connectionId === connection.id && !["completed", "failed", "unknown"].includes(job.status))) throw new AppError("진행 중인 미디어 작업의 결과를 확보한 뒤 연결을 해제하세요.", 409, "active_jobs");
       const revoked = connection.provider === "openai" && connection.method === "oauth" ? await revokeOpenAI(connection) : false;
       if (connection.provider === "openai" && connection.method === "oauth") {

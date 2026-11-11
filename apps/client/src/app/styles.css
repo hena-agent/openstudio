@@ -1,0 +1,50 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;450;500;550;600;650;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+@layer theme, base, legacy, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "./globals.css" layer(legacy);
+@import "./production.css" layer(components);
+@import "tailwindcss/utilities.css" layer(utilities);
+@source "../components";
+
+@custom-variant dark (&:is(.dark *));
+@theme inline {
+  --color-background: var(--ui-background);
+  --color-foreground: var(--ui-foreground);
+  --color-card: var(--ui-card);
+  --color-card-foreground: var(--ui-foreground);
+  --color-popover: var(--ui-card);
+  --color-popover-foreground: var(--ui-foreground);
+  --color-primary: var(--ui-primary);
+  --color-primary-foreground: #111629;
+  --color-secondary: var(--ui-secondary);
+  --color-secondary-foreground: var(--ui-foreground);
+  --color-accent: var(--ui-accent);
+  --color-accent-foreground: var(--ui-foreground);
+  --color-muted: var(--ui-secondary);
+  --color-muted-foreground: var(--ui-muted);
+  --color-border: var(--ui-border);
+  --color-input: var(--ui-input);
+  --color-ring: var(--ui-primary);
+  --color-destructive: #f1b2ab;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+}
+@layer base {
+  /* Keep browser-centered native dialogs alongside Radix dialogs after Preflight. */
+  dialog { margin: auto; }
+  :root {
+    --ui-background: #141517;
+    --ui-card: #191b1f;
+    --ui-foreground: #ededf0;
+    --ui-primary: #a3b7ff;
+    --ui-secondary: #24272e;
+    --ui-accent: #2d3340;
+    --ui-muted: #bdc0ca;
+    --ui-border: #333740;
+    --ui-input: #484f5e;
+    --ui-panel-padding: 24px;
+  }
+  @media (max-width: 640px) { :root { --ui-panel-padding: 16px; } }
+}

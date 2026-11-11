@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import "./globals.css";
+import "./styles.css";
+import { UiProvider } from "@/components/ui-provider";
 
 export const metadata: Metadata = {
   title: "OpenStudio · 모델 작업 공간",
@@ -7,5 +8,5 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="ko" style={{ colorScheme: "dark" }}><body>{children}</body></html>;
+  return <html lang="ko" className="dark" style={{ colorScheme: "dark" }}><body><UiProvider>{children}</UiProvider></body></html>;
 }
