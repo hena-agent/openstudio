@@ -43,7 +43,7 @@ export type PreparationArtifact = {
   approvedAt?: string; stale?: boolean; feedback?: string; taskId?: string;
   assetIds?: string[];
 };
-export type WorkflowLog = { id: string; role: "user" | "assistant" | "tool" | "system"; text: string; createdAt: string; taskId?: string };
+export type WorkflowLog = { id: string; role: "user" | "assistant" | "tool" | "system"; text: string; createdAt: string; taskId?: string; kind?: "message" | "activity" };
 export type WorkflowProposal = { id: string; name: string; summary: string; steps: WorkflowStep[]; outputs: WorkflowOutput[]; createdAt: string; taskId: string; basedOnRevision: number; scope?: "single-video" };
 export type WorkflowTask = {
   id: string; projectId: string; requestId: string; kind: "plan" | "step"; stepId?: string;
@@ -59,7 +59,7 @@ export type WorkflowProject = {
   settings?: ProductionSettings; video?: VideoTarget; references?: ProductionReference[]; scope?: "single-video";
   legacySessionId?: string;
 };
-export type ProductionSession = WorkflowProject & { projectId: string; sourceRevision: number; requestId: string; legacy?: boolean; productionGuidance?: string };
+export type ProductionSession = WorkflowProject & { projectId: string; sourceRevision: number; requestId: string; legacy?: boolean; productionGuidance?: string; inputOrderVersion?: 1 };
 export function finalResultSteps(project: Pick<WorkflowProject, "steps">) {
   const marked = project.steps.filter((step) => step.finalOutput);
   return marked.length ? marked : project.steps.filter((step) => !project.steps.some((next) => next.inputs.includes(step.id)));
@@ -71,13 +71,31 @@ export function videoTarget(project: Pick<WorkflowProject, "outputs" | "video">)
   const output = project.outputs.find((item) => ["mp4", "webm", "gif"].includes(item.format));
   return output ? { width: output.width, height: output.height, durationSeconds: output.durationSeconds } : project.video || { ...defaultVideoTarget };
 }
-export type WorkflowIssue = { stepId?: string; outputId?: string; message: string };
-export function workflowIssues(definition: { steps: WorkflowStep[]; outputs: WorkflowOutput[] }): WorkflowIssue[] {
+export type WorkflowIssue = { stepId?: string; outputId?: string; inputId?: string; code?: "input_order"; message: string };
+export function precedingSteps(steps: WorkflowStep[], stepId: string) {
+  const index = steps.findIndex((step) => step.id === stepId);
+  return index < 0 ? [] : steps.slice(0, index);
+}
+export function inputOrderIssues(steps: WorkflowStep[]): WorkflowIssue[] {
+  const positions = new Map(steps.map((step, index) => [step.id, index]));
+  return steps.flatMap((step, index) => step.inputs.filter((id) => positions.has(id) && positions.get(id)! >= index).map((id) => ({ stepId: step.id, inputId: id, code: "input_order" as const, message: `입력은 앞선 스텝만 연결할 수 있습니다: ${steps[positions.get(id)!].name}` })));
+}
+export function moveWorkflowStep(steps: WorkflowStep[], id: string, offset: number): { steps: WorkflowStep[]; reason?: string } {
+  const from = steps.findIndex((step) => step.id === id), to = from + offset;
+  if (from < 0 || to < 0 || to >= steps.length) return { steps, reason: "이 위치로 이동할 수 없습니다." };
+  const next = [...steps]; [next[from], next[to]] = [next[to], next[from]];
+  const previousIssues = new Set(inputOrderIssues(steps).map((issue) => `${issue.stepId}:${issue.inputId}`));
+  if (inputOrderIssues(next).some((issue) => !previousIssues.has(`${issue.stepId}:${issue.inputId}`))) return { steps, reason: "입력 연결을 거스르는 이동입니다. 먼저 연결을 해제하거나 선행 스텝 뒤로 이동하세요." };
+  return { steps: next };
+}
+export function workflowIssues(definition: { steps: WorkflowStep[]; outputs: WorkflowOutput[]; projectId?: string; sourceRevision?: number; inputOrderVersion?: 1 }): WorkflowIssue[] {
   const issues: WorkflowIssue[] = [], ids = new Set<string>();
   for (const step of definition.steps) {
     if (ids.has(step.id)) issues.push({ stepId: step.id, message: "스텝 ID가 중복됐습니다." });
     ids.add(step.id);
   }
+  // Sessions created before the ordered-input rule retain their frozen DAG semantics.
+  if (!("projectId" in definition && "sourceRevision" in definition) || "inputOrderVersion" in definition && definition.inputOrderVersion === 1) issues.push(...inputOrderIssues(definition.steps));
   const visiting = new Set<string>(), visited = new Set<string>();
   const visit = (id: string): boolean => {
     if (visiting.has(id)) return true;

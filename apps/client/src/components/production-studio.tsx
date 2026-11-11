@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronRight, LoaderCircle, Plus, RefreshCw, Save } from "lucide-react";
 import type { Asset, Connection } from "@openstudio/shared/types";
-import { agentBindingSchema, productionSettingsSchema, productionComplete, finalResultSteps, workflowDefinitionSchema, workflowIssues, type ProductionPreset, type ProductionSession, type WorkflowProject, type WorkflowStep, type WorkflowTask } from "@openstudio/shared/workflow";
+import { agentBindingSchema, moveWorkflowStep, productionSettingsSchema, productionComplete, finalResultSteps, workflowDefinitionSchema, workflowIssues, type ProductionPreset, type ProductionSession, type WorkflowProject, type WorkflowStep, type WorkflowTask } from "@openstudio/shared/workflow";
 import { studioApi } from "@/lib/client-api";
 import { WorkspaceTabs } from "./workspace-tabs";
 import { ProductionAgent, ProductionSteps, StepSettings } from "./production-panels";
@@ -76,14 +76,16 @@ export function ProductionStudio({ ready, active: visible = true, connections, o
 
   function change(update: Partial<Definition>) { setDraft((old) => old ? { ...old, ...update } : old); setDirty(true); }
   function changeStep(update: Partial<WorkflowStep>) { if (step && draft) change({ steps: draft.steps.map((item) => item.id === step.id ? { ...item, ...update } : item) }); }
+  function canLeaveProject() { return !(dirty || resultDirty) || window.confirm("저장하지 않은 구성·결과·대화 초안을 버리고 다른 프로젝트로 이동할까요?"); }
   async function action(name: string, work: () => Promise<void>) {
-    if (busy) return; setBusy(name); setError("");
+    if (busy || name === "create" && !canLeaveProject()) return; setBusy(name); setError("");
     try { await work(); } catch (error) { setError((error as Error).message); } finally { setBusy(""); }
   }
   async function post(body: object) {
     const input = body as Record<string, unknown>;
     if (input.action === "save") {
       if (input.agent && !agentBindingSchema.safeParse(input.agent).success) throw new Error("프로젝트 에이전트의 계정과 모델을 모두 선택하세요.");
+      for (const item of (input.steps || []) as WorkflowStep[]) if (item.agent && !agentBindingSchema.safeParse(item.agent).success) throw new Error(`${item.name}의 실행 계정과 모델을 모두 선택하세요.`);
       const checked = workflowDefinitionSchema.safeParse(input);
       if (!checked.success) throw new Error(`스텝·출력 설정을 확인하세요: ${checked.error.issues[0].path.join(" → ")} (${checked.error.issues[0].message})`);
       if (input.settings && !productionSettingsSchema.safeParse(input.settings).success) throw new Error("제작 기본값의 모델 선택과 입력 내용을 확인하세요.");
@@ -119,8 +121,9 @@ export function ProductionStudio({ ready, active: visible = true, connections, o
   }
   function move(id: string, offset: number) {
     if (!draft) return;
-    const steps = [...draft.steps], from = steps.findIndex((item) => item.id === id), to = from + offset;
-    if (to < 0 || to >= steps.length) return; [steps[from], steps[to]] = [steps[to], steps[from]]; change({ steps });
+    const result = moveWorkflowStep(draft.steps, id, offset);
+    if (result.reason) { setError(result.reason); return; }
+    setError(""); change({ steps: result.steps });
   }
   function requestPlan() { setTab("steps"); setFocusTarget("plan"); }
   function addStep() {
@@ -155,19 +158,19 @@ export function ProductionStudio({ ready, active: visible = true, connections, o
   const hasPlanContext = !!(draft?.brief.trim() || draft?.settings?.brand.trim() || planMessage.trim());
   const blockedReason = dirty ? "변경한 구성을 먼저 저장하세요." : !hasModel ? "목표·모델에서 모델을 선택하세요." : !hasPlanContext ? "제작 방향이나 요청을 입력하세요." : undefined;
   const outputCount = sessions.filter((item) => item.projectId === selected && productionComplete(item)).reduce((sum, item) => sum + finalResultSteps(item).length, 0);
+  const editingConfiguration = tab === "setup" || tab === "steps";
 
   return <section className="production-studio">
     <WorkspaceTabs id="production" label="제작 스튜디오 작업" tabs={[{ id: "setup", label: "목표·모델" }, { id: "steps", label: "스텝 구성", disabled: !project }, { id: "review", label: "제작", count: sessions.filter((item) => item.projectId === selected).length, disabled: !project }, { id: "outputs", label: "출력", count: outputCount, disabled: !project }]} value={tab} onChange={(value) => setTab(value as Tab)} />
-    <header className="production-toolbar">
-      <ProjectSwitcher projects={projects} selected={selected} disabled={!!busy} onSelect={(id) => { if (!(dirty || resultDirty) || window.confirm("저장하지 않은 구성·결과 편집을 버리고 이동할까요?")) setSelected(id); }} />
-      {project ? <EditableTitle key={project.id} value={project.name} disabled={!!busy} onSave={rename} /> : <strong className="text-base font-semibold">제작 프로젝트</strong>}
-      <Button variant="secondary" disabled={!ready || !!busy} onClick={() => createProject()}><Plus />프로젝트</Button>
-      {project && <Button variant="outline" disabled={dirty || !!busy} onClick={() => createProject(true)}>구성 복제</Button>}
-      <IconButton label="제작 상태 새로고침" size="icon" disabled={!!busy} onClick={() => void action("refresh", reload)}><RefreshCw /></IconButton>
-      {project && <><Badge variant="outline">구성 v{project.revision} · {dirty ? "미저장" : "저장됨"}</Badge><Button variant="secondary" disabled={!dirty || !!busy} onClick={() => void action("save", save)}>{busy === "save" ? <LoaderCircle className="animate-spin" /> : <Save />}구성 저장</Button><Badge className="production-mode-badge" variant="outline" title="원고·명세·코드를 준비하며 영상 파일 생성과 렌더링은 실행하지 않습니다.">제작 준비 모드</Badge></>}
+    <header className={`production-toolbar${!editingConfiguration ? " production-toolbar-compact" : ""}`}>
+      <ProjectSwitcher projects={projects} selected={selected} disabled={!!busy} onSelect={(id) => { if (id === selected || canLeaveProject()) setSelected(id); }} />
+      {project ? editingConfiguration ? <EditableTitle key={project.id} value={project.name} disabled={!!busy} onSave={rename} /> : <strong className="min-w-0 flex-1 truncate text-sm font-semibold">{project.name}</strong> : <strong className="text-base font-semibold">제작 프로젝트</strong>}
+      {editingConfiguration && <><Button variant="secondary" disabled={!ready || !!busy} onClick={() => createProject()}><Plus />프로젝트</Button>{project && <Button variant="outline" disabled={dirty || !!busy} onClick={() => createProject(true)}>구성 복제</Button>}</>}
+      <IconButton label="제작 상태 새로고침" size={editingConfiguration ? "icon" : "icon-sm"} disabled={!!busy} onClick={() => void action("refresh", reload)}><RefreshCw /></IconButton>
+      {project && <>{editingConfiguration && <><Badge variant="outline">구성 v{project.revision} · {dirty ? "미저장" : "저장됨"}</Badge><Button variant="secondary" disabled={!dirty || !!busy} onClick={() => void action("save", save)}>{busy === "save" ? <LoaderCircle className="animate-spin" /> : <Save />}구성 저장</Button></>}<Badge className={`production-mode-badge${!editingConfiguration ? " max-sm:hidden" : ""}`} variant="outline" title="원고·명세·코드를 준비하며 영상 파일 생성과 렌더링은 실행하지 않습니다.">제작 준비 모드</Badge></>}
     </header>
     <div className="production-notices">
-      {(error || pollError) && <Notice variant="error">{error || pollError}</Notice>}
+      {(pollError || editingConfiguration && error) && <Notice variant="error">{pollError || error}</Notice>}
       {operation && project && <Notice><LoaderCircle className="size-4 animate-spin" />{operation.kind === "plan" ? "제작 계획 제안" : project.steps.find((item) => item.id === operation.stepId)?.name || "스텝 준비"} · {operation.status === "queued" ? "실행 대기" : "실행 중"} · 기준 계획 v{operation.basedOnRevision || project.revision}<Button variant="ghost" size="sm" onClick={() => setTab(operation.kind === "plan" ? "steps" : "review")}>진행 화면으로</Button></Notice>}
       {dirty && project && <Notice variant="warning">원본 구성에 미저장 변경이 있습니다. 새 제작·계획 제안 전에는 저장하세요. 기존 제작은 자체 구성을 유지합니다. {project.revision !== draft?.revision && "다른 화면의 변경과 저장 충돌을 확인하세요."}<Button variant="ghost" size="sm" onClick={() => { setDraft(definitionOf(project)); setDirty(false); }}>편집 취소</Button></Notice>}
       {(tab === "setup" || tab === "steps") && issues.length > 0 && draft && <Notice variant="warning"><ul className="m-0 list-none space-y-1 p-0">{issues.map((issue, index) => <li key={index}>{draft.steps.find((item) => item.id === issue.stepId)?.name || draft.outputs.find((item) => item.id === issue.outputId)?.name || "계획"}: {issue.message}</li>)}</ul></Notice>}
@@ -181,9 +184,9 @@ export function ProductionStudio({ ready, active: visible = true, connections, o
         </Panel>}
 
         {tab === "steps" && <div className={`production-layout${!draft.steps.length ? " production-layout-empty" : ""}`}>
-          {!!draft.steps.length && <ProductionSteps steps={draft.steps} project={{ ...project, states: {} }} selected={stepId} editing onSelect={setStepId} onAdd={addStep} onMove={move} />}
+          {!!draft.steps.length && <ProductionSteps steps={draft.steps} project={{ ...project, agent: draft.agent, states: {} }} connections={connections} selected={stepId} editing onSelect={setStepId} onAdd={addStep} onMove={move} />}
           <Panel key={stepId} role="region" className="production-editor" aria-label="스텝 설정">
-            {step ? <StepSettings disabled={!!busy} step={step} steps={draft.steps} project={{ ...project, states: {}, settings: draft.settings }} connections={connections} onChange={changeStep} onDelete={() => { change({ steps: draft.steps.filter((item) => item.id !== step.id), outputs: draft.outputs.filter((item) => item.sourceStepId !== step.id) }); setStepId(draft.steps.find((item) => item.id !== step.id)?.id || ""); }} onReview={() => setTab("review")} /> : <EmptyState className="min-h-0 p-0 sm:p-0" title="제작 과정을 구성하세요" description="대화로 스텝을 제안받거나 직접 추가하세요. 저장한 구성은 새 제작에 사용합니다." actions={<><InlineAction onClick={requestPlan}>계획 제안<ChevronRight /></InlineAction><Button variant="outline" size="sm" onClick={addStep}><Plus />스텝 직접 추가</Button></>} />}
+            {step ? <StepSettings disabled={!!busy} step={step} steps={draft.steps} project={{ ...project, agent: draft.agent, states: {}, settings: draft.settings }} connections={connections} onChange={changeStep} onDelete={() => { change({ steps: draft.steps.filter((item) => item.id !== step.id), outputs: draft.outputs.filter((item) => item.sourceStepId !== step.id) }); setStepId(draft.steps.find((item) => item.id !== step.id)?.id || ""); }} onReview={() => setTab("review")} /> : <EmptyState className="min-h-0 p-0 sm:p-0" title="제작 과정을 구성하세요" description="대화로 스텝을 제안받거나 직접 추가하세요. 저장한 구성은 새 제작에 사용합니다." actions={<><InlineAction onClick={requestPlan}>계획 제안<ChevronRight /></InlineAction><Button variant="outline" size="sm" onClick={addStep}><Plus />스텝 직접 추가</Button></>} />}
           </Panel>
           <ProductionAgent mode="plan" project={project} tasks={tasks.filter((item) => !item.sessionId)} active={operation} message={agentMessage} modelId={draft.agent?.modelId} blockedReason={blockedReason} busy={!!busy} dirty={dirty} canPlan={runnable && hasModel && hasPlanContext} canFeedback={false} onMessage={operation ? setLiveMessage : setPlanMessage} onPlan={() => void action("plan", aiAction)} onFeedback={() => {}} onNote={() => void action("note", sendNote)} onApply={(id) => void action("apply", async () => { const saved = await post({ action: "apply-proposal", id: project.id, revision: project.revision, proposalId: id }); setDraft(definitionOf(saved)); setDirty(false); setStepId(saved.steps[0]?.id || ""); })} onNavigate={setTab} />
         </div>}

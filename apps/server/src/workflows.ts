@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
-  agentBindingSchema, preparationReady, readySteps, workflowDefinitionSchema, workflowIssues, productionSettingsSchema, productionReferenceSchema, videoTargetSchema, videoTarget, finalResultSteps, productionComplete,
+  agentBindingSchema, preparationReady, readySteps, workflowDefinitionSchema, workflowIssues, inputOrderIssues, productionSettingsSchema, productionReferenceSchema, videoTargetSchema, videoTarget, finalResultSteps, productionComplete,
   type AgentBinding, type PreparationArtifact, type ProductionSettings, type ProductionReference, type WorkflowProject, type WorkflowStep,
 } from "@openstudio/shared/workflow";
 import { modelTasks } from "@openstudio/shared/provider-registry";
@@ -53,8 +53,8 @@ export function publicWorkflowTask(task: StoredWorkflowTask) {
   const { id, projectId, sessionId, requestId, kind, stepId, status, createdAt, updatedAt, feedback, error } = task;
   return { id, projectId, sessionId, requestId, kind, stepId, status, createdAt, updatedAt, feedback, error, basedOnRevision: task.snapshot.revision };
 }
-export function addLog(project: WorkflowProject, role: "user" | "assistant" | "tool" | "system", text: string, taskId?: string) {
-  project.logs.push({ id: randomUUID(), role, text: text.slice(0, 6000), taskId, createdAt: now() });
+export function addLog(project: WorkflowProject, role: "user" | "assistant" | "tool" | "system", text: string, taskId?: string, kind: "message" | "activity" = role === "system" || role === "tool" ? "activity" : "message") {
+  project.logs.push({ id: randomUUID(), role, text: text.slice(0, 6000), taskId, kind, createdAt: now() });
   project.updatedAt = now();
 }
 export function stepHash(project: WorkflowProject, step: WorkflowStep) {
@@ -79,6 +79,16 @@ function validateSettings(data: Workspace, settings?: ProductionSettings, refere
     const connection = data.connections.find((item) => item.id === binding.connectionId && item.status !== "disconnected");
     const model = connection?.models.find((item) => item.id === binding.modelId);
     if (!model || !modelTasks(model).includes(kind)) throw new AppError("제작 기본 모델의 연결 계정과 모델을 확인하세요.");
+  }
+}
+export function validateStepConfiguration(data: Workspace, steps: WorkflowStep[]) {
+  const issue = inputOrderIssues(steps)[0];
+  if (issue) throw new AppError(issue.message, 409, "invalid_workflow");
+  for (const step of steps) {
+    if (!step.agent) continue;
+    const connection = data.connections.find((item) => item.id === step.agent!.connectionId && item.status !== "disconnected");
+    const model = connection?.models.find((item) => item.id === step.agent!.modelId);
+    if (!model || !modelTasks(model).includes("text") || model.callable === false || model.metadata?.tools === false) throw new AppError(`${step.name}의 실행 모델을 이 워크스페이스의 도구 호출 지원 텍스트 모델로 선택하세요.`, 400, "invalid_step_model");
   }
 }
 const presetOperation = z.object({ name: z.string().trim().min(1).max(120), settings: productionSettingsSchema, agent: agentBindingSchema.optional(), id: z.uuid().optional(), revision: z.number().int().optional() });
@@ -184,7 +194,7 @@ function queueTask(data: Workspace, project: WorkflowProject, requestId: string,
     project.states[step.id] = { status: "queued", artifactId: previous?.id };
   }
   (data.workflowTasks ??= []).push(task);
-  addLog(project, "user", feedback || (kind === "plan" ? "제작 계획을 제안해 주세요." : `${step!.name} 준비 실행`), task.id);
+  addLog(project, "user", feedback || (kind === "plan" ? "제작 계획을 제안해 주세요." : `${step!.name} 준비 실행`), task.id, feedback ? "message" : "activity");
   return task;
 }
 function queueNext(data: Workspace, project: WorkflowProject) {
@@ -222,7 +232,7 @@ export function finalizeWorkflowTask(data: Workspace, task: StoredWorkflowTask) 
     const step = project.steps.find((item) => item.id === task.stepId);
     if (step) {
       if (!project.artifacts.some((item) => item.taskId === task.id)) appendArtifact(project, step, result.content, "agent", task);
-      addLog(project, "assistant", `${step.name} 준비 결과를 제출했습니다.`, task.id);
+      addLog(project, "assistant", `${step.name} 준비 결과를 제출했습니다.`, task.id, "activity");
     } else {
       project.artifacts.push({ id: randomUUID(), stepId: task.stepId!, version: 1, content: result.content, kind: task.snapshot.step?.kind === "code" ? "code" : "specification", createdAt: now(), source: "agent", definitionHash: task.definitionHash!, inputArtifacts: task.inputArtifacts, stale: true, taskId: task.id });
       addLog(project, "system", "삭제된 스텝의 실행 결과를 이력에 보존했습니다.", task.id);
@@ -266,6 +276,7 @@ export async function mutateWorkflow(workspaceId: string, raw: unknown) {
       const settings = structuredClone(source?.settings || preset?.settings || productionSettingsSchema.parse({}));
       validateSettings(data, settings);
       const steps = source && input.reuseSteps ? structuredClone(source.steps) : [], outputs = source && input.reuseSteps ? structuredClone(source.outputs) : [];
+      validateStepConfiguration(data, steps);
       const project: WorkflowProject = { id: randomUUID(), name: input.name, brief: input.brief, agent: structuredClone(input.agent || source?.agent || preset?.agent), revision: 1, createdAt: now(), updatedAt: now(), steps, outputs, states: Object.fromEntries(steps.map((step) => [step.id, { status: "idle" as const }])), artifacts: [], logs: [], proposals: [], autoRun: false,
         settings, video: source ? videoTarget(source) : videoTarget({ outputs: [] }), references: [], scope: "single-video" };
       (data.projects ??= []).push(project); return { project };
@@ -279,10 +290,11 @@ export async function mutateWorkflow(workspaceId: string, raw: unknown) {
       }
       if (template.revision !== input.revision) throw new AppError("스텝 구성이 변경됐습니다. 최신 구성을 확인하고 제작을 시작하세요.", 409);
       const definition = { ...template, outputs: [] }; assertDefinition(definition);
+      validateStepConfiguration(data, template.steps);
       if (!template.steps.length) throw new AppError("제작할 스텝을 먼저 구성하세요.", 409);
       validateSettings(data, template.settings, input.references);
       const session: StoredProductionSession = { ...structuredClone(template), id: randomUUID(), projectId: template.id, sourceRevision: template.revision, requestId: input.requestId, name: input.name, brief: input.brief, productionGuidance: template.brief, outputs: [], video: videoTarget(template), references: input.references,
-        states: Object.fromEntries(template.steps.map((step) => [step.id, { status: "idle" as const }])), artifacts: [], logs: [], proposals: [], autoRun: false, createdAt: now(), updatedAt: now(), runtimeModels: snapshotModels(data, template, true) };
+        states: Object.fromEntries(template.steps.map((step) => [step.id, { status: "idle" as const }])), artifacts: [], logs: [], proposals: [], autoRun: false, createdAt: now(), updatedAt: now(), inputOrderVersion: 1, runtimeModels: snapshotModels(data, template, true) };
       delete session.legacySessionId;
       (data.productionSessions ??= []).push(session);
       return { project: template, session: publicProductionSession(session) };
@@ -294,18 +306,20 @@ export async function mutateWorkflow(workspaceId: string, raw: unknown) {
       project.name = input.name; addLog(project, "user", `프로젝트 이름을 '${input.name}'으로 변경했습니다.`); return { project };
     }
     if ("revision" in input && project.revision !== input.revision) throw new AppError("다른 화면에서 프로젝트가 변경됐습니다. 새로고침 후 다시 저장하세요.", 409, "revision_conflict");
-    if (input.action === "save") { validateSettings(data, input.settings ?? project.settings, input.references ?? project.references); updateDefinition(project, { ...input, name: project.name }); cancelObsoleteQueuedTasks(data, project); return { project }; }
+    if (input.action === "save") { validateStepConfiguration(data, input.steps); validateSettings(data, input.settings ?? project.settings, input.references ?? project.references); updateDefinition(project, { ...input, name: project.name }); cancelObsoleteQueuedTasks(data, project); return { project }; }
     if (input.action === "plan") return { task: publicWorkflowTask(queueTask(data, project, input.requestId, "plan", undefined, input.feedback)), project };
     if (input.action === "apply-proposal") {
       const proposal = project.proposals.find((item) => item.id === input.proposalId);
       if (!proposal) throw new AppError("계획 제안을 찾을 수 없습니다.", 404);
       if (proposal.basedOnRevision !== project.revision) throw new AppError("제안 이후 계획이 수정됐습니다. 현재 계획을 기준으로 다시 제안받으세요.", 409);
+      validateStepConfiguration(data, proposal.steps);
+      assertDefinition({ ...project, steps: proposal.steps, outputs: proposal.outputs });
       updateDefinition(project, { ...project, steps: structuredClone(proposal.steps), outputs: structuredClone(proposal.outputs) });
       if (proposal.scope) project.scope = proposal.scope;
       cancelObsoleteQueuedTasks(data, project);
       addLog(project, "user", "에이전트 제안을 제작 계획에 적용했습니다."); return { project };
     }
-    if (input.action === "pause") { project.autoRun = false; addLog(project, "user", "현재 작업 뒤 자동 진행을 멈춥니다."); return { project }; }
+    if (input.action === "pause") { project.autoRun = false; addLog(project, "user", "현재 작업 뒤 자동 진행을 멈춥니다.", undefined, "activity"); return { project }; }
     if (input.action === "note") {
       const task = data.workflowTasks?.find((item) => item.id === input.taskId && taskBelongs(item, project));
       if (!task || !["queued", "running"].includes(task.status) || task.result) throw new AppError("결과가 이미 제출됐습니다. 결과 검수에서 피드백을 보내세요.", 409);
@@ -327,7 +341,7 @@ export async function mutateWorkflow(workspaceId: string, raw: unknown) {
       if (activeTask(data, project)) throw new AppError("현재 실행이 끝난 뒤 결과를 수정하세요.", 409);
       if (input.assetIds?.some((id) => !data.assets?.some((asset) => asset.id === id))) throw new AppError("이 워크스페이스의 결과 파일을 선택하세요.", 404);
       currentInputs(project, step); invalidateSteps(project, [step.id]); project.autoRun = false;
-      const artifact = appendArtifact(project, step, input.content, "user"); artifact.assetIds = input.assetIds || []; addLog(project, "user", `${step.name} 결과를 직접 수정했습니다.`); return { project };
+      const artifact = appendArtifact(project, step, input.content, "user"); artifact.assetIds = input.assetIds || []; addLog(project, "user", `${step.name} 결과를 직접 수정했습니다.`, undefined, "activity"); return { project };
     }
     const state = project.states[step.id], artifact = project.artifacts.find((item) => item.id === input.artifactId);
     if (!artifact || artifact.stepId !== step.id || state?.artifactId !== artifact.id || artifact.stale || artifact.definitionHash !== stepHash(project, step)) throw new AppError("현재 스텝의 최신 결과를 검수하세요.", 409);
@@ -336,7 +350,7 @@ export async function mutateWorkflow(workspaceId: string, raw: unknown) {
     if (state.status === "complete") return { project };
     if (state.status !== "review") throw new AppError("검수 대기 중인 결과가 아닙니다.", 409);
     artifact.approvedAt = now(); project.states[step.id] = { status: "complete", artifactId: artifact.id };
-    addLog(project, "user", `${step.name} v${artifact.version} 승인`); queueNext(data, project); return { project };
+    addLog(project, "user", `${step.name} v${artifact.version} 승인`, undefined, "activity"); queueNext(data, project); return { project };
   });
   return isSession(result.project) ? { ...result, project: publicProductionSession(result.project) } : result;
 }

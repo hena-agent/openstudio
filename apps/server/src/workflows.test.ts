@@ -46,6 +46,50 @@ async function run(project: WorkflowProject, stepId?: string, all = false, feedb
 }
 
 describe("production preparation workflow", () => {
+  it("uses a step's own account/model and keeps it frozen when the template returns to inheritance", async () => {
+    const other = "79dbeb4c-1424-4845-91e6-20c87b289c5f";
+    await transaction(alice, (data) => { data.connections.push({ id: other, provider: "openai", label: "Code account", method: "api-key", secret: "sk-mock-code-key", baseURL: "https://api.openai.com/v1", createdAt: "now", models: [{ id: "code-model", name: "Code Model", endpoints: ["/responses"], tasks: ["text"], metadata: { tools: true } }] }); });
+    let project = await create([step("script", [], false), { ...step("code", ["script"], false, "code"), agent: { connectionId: other, modelId: "code-model" } }]);
+    const session = await startSession(project);
+    project = (await mutateWorkflow(alice, { action: "save", ...project, steps: project.steps.map((item) => ({ ...item, agent: undefined })) })).project;
+    await transaction(alice, (data) => { data.connections.find((item) => item.id === other)!.models = []; });
+    const first = (await mutateWorkflow(alice, { action: "run", id: project.id, sessionId: session.id, stepId: "script", requestId: crypto.randomUUID(), consent: true })).task!;
+    await processWorkflowTask(alice, first.id, async (model, context, options) => { expect(model.id).toBe("text-model"); expect(model.provider).toBe("deepseek"); return streamTool("submit_result", { content: "Script" })(model, context, options); });
+    const second = (await mutateWorkflow(alice, { action: "run", id: project.id, sessionId: session.id, stepId: "code", requestId: crypto.randomUUID(), consent: true })).task!;
+    await processWorkflowTask(alice, second.id, async (model, context, options) => { expect(model.id).toBe("code-model"); expect(model.provider).toBe("openai"); return streamTool("submit_result", { content: "<svg/>" })(model, context, options); });
+    const saved = await getSession(project.id, session.id); expect(saved.states.code.status).toBe("complete"); expect(saved.steps[1].agent?.connectionId).toBe(other);
+    const fresh = await startSession(project, "Inherited");
+    const next = (await mutateWorkflow(alice, { action: "run", id: project.id, sessionId: fresh.id, stepId: "script", requestId: crypto.randomUUID(), consent: true })).task!;
+    expect(await transaction(alice, (data) => data.workflowTasks!.find((item) => item.id === next.id)!.agent)).toEqual(binding);
+    await expect(mutateWorkflow(alice, { action: "save", ...project, steps: [{ ...project.steps[0], agent: { connectionId: crypto.randomUUID(), modelId: "foreign" } }] })).rejects.toMatchObject({ code: "invalid_step_model" });
+  });
+  it("rejects future inputs in direct saves, agent proposals, old proposal application and new production starts", async () => {
+    const project = await create([step("a"), step("b", ["a"])]), frozen = await startSession(project);
+    const bad = [step("b", ["a"]), step("a")];
+    await expect(mutateWorkflow(alice, { action: "save", ...project, steps: bad })).rejects.toMatchObject({ code: "invalid_workflow" });
+    expect((await get(project.id)).revision).toBe(project.revision);
+    const task = (await mutateWorkflow(alice, { action: "plan", id: project.id, requestId: crypto.randomUUID(), consent: true })).task!;
+    await processWorkflowTask(alice, task.id, streamTool("propose_workflow", { name: "Wrong order", summary: "Wrong order", steps: bad, outputs: [] }));
+    expect((await get(project.id)).proposals).toHaveLength(0);
+    const badModel = (await mutateWorkflow(alice, { action: "plan", id: project.id, requestId: crypto.randomUUID(), consent: true })).task!;
+    await processWorkflowTask(alice, badModel.id, streamTool("propose_workflow", { name: "Unknown account", summary: "Invalid model binding", steps: [{ ...step("a"), agent: { connectionId: crypto.randomUUID(), modelId: "foreign" } }], outputs: [] }));
+    expect((await get(project.id)).proposals).toHaveLength(0);
+    const proposalId = crypto.randomUUID();
+    await transaction(alice, (data) => { projectIn(data, project.id).proposals.push({ id: proposalId, name: "Legacy proposal", summary: "Old order", steps: bad, outputs: [], taskId: task.id, createdAt: "now", basedOnRevision: project.revision }); });
+    await expect(mutateWorkflow(alice, { action: "apply-proposal", id: project.id, revision: project.revision, proposalId })).rejects.toMatchObject({ code: "invalid_workflow" });
+    await transaction(alice, (data) => { projectIn(data, project.id).steps = bad; });
+    await expect(startSession(await get(project.id), "Invalid")).rejects.toMatchObject({ code: "invalid_workflow" });
+    expect((await getSession(project.id, frozen.id)).steps).toEqual(project.steps);
+  });
+  it("keeps frozen pre-rule sessions runnable even when their existing DAG is not in array order", async () => {
+    const project = await create([step("a", [], false), step("b", ["a"], false)]), session = await startSession(project);
+    await transaction(alice, (data) => { const previous = sessionIn(data, project.id, session.id); delete previous.inputOrderVersion; previous.steps.reverse(); });
+    for (const stepId of ["a", "b"]) {
+      const task = (await mutateWorkflow(alice, { action: "run", id: project.id, sessionId: session.id, stepId, requestId: crypto.randomUUID(), consent: true })).task!;
+      await processWorkflowTask(alice, task.id, streamTool("submit_result", { content: stepId }));
+    }
+    const saved = await getSession(project.id, session.id); expect(saved.steps.map((item) => item.id)).toEqual(["b", "a"]); expect(saved.states.b.status).toBe("complete");
+  });
   it("recovers session work after reopening SQLite without replaying committed or ambiguous model calls", async () => {
     const project = await create([step("script")]), a = await startSession(project), b = await startSession(project, "B");
     const first = (await mutateWorkflow(alice, { action: "run", id: project.id, sessionId: a.id, stepId: "script", requestId: crypto.randomUUID(), consent: true })).task!;
@@ -269,12 +313,12 @@ describe("production preparation workflow", () => {
   });
   it("allows step insertion, deletion and reordering but never executes dangling or cyclic inputs", async () => {
     let project = await create([step("a"), step("b", ["a"])]);
-    project = (await mutateWorkflow(alice, { action: "save", ...project, steps: [step("b", ["a"]), step("a"), step("extra")], revision: project.revision })).project;
-    expect(project.steps.map((item) => item.id)).toEqual(["b", "a", "extra"]);
+    await expect(mutateWorkflow(alice, { action: "save", ...project, steps: [step("b", ["a"]), step("a")] })).rejects.toMatchObject({ code: "invalid_workflow" });
+    project = (await mutateWorkflow(alice, { action: "save", ...project, steps: [step("extra"), step("a"), step("b", ["a"])], revision: project.revision })).project;
+    expect(project.steps.map((item) => item.id)).toEqual(["extra", "a", "b"]);
     project = (await mutateWorkflow(alice, { action: "save", ...project, steps: project.steps.filter((item) => item.id !== "a") })).project;
     expect(workflowIssues(project)[0].message).toContain("없는 입력"); await expect(run(project, "b")).rejects.toMatchObject({ code: "invalid_workflow" });
-    project = (await mutateWorkflow(alice, { action: "save", ...project, steps: [step("a", ["b"]), step("b", ["a"])] })).project;
-    expect(workflowIssues(project).some((issue) => issue.message.includes("순환"))).toBe(true); await expect(run(project, "a")).rejects.toMatchObject({ code: "invalid_workflow" });
+    await expect(mutateWorkflow(alice, { action: "save", ...project, steps: [step("a", ["b"]), step("b", ["a"])] })).rejects.toMatchObject({ code: "invalid_workflow" });
     await expect(mutateWorkflow(alice, { action: "save", ...project, steps: [step("__proto__")] })).rejects.toThrow();
   });
   it("persists a user question and consumes review feedback in a subsequent preparation", async () => {

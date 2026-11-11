@@ -10,8 +10,8 @@ import { Message, MessageContent, MessageResponse, ToolEvent } from "./message";
 export function Conversation({ messages, conversationId, emptyText, children }: { messages: WorkflowLog[]; conversationId: string; emptyText: string; children?: ReactNode }) {
   const viewport = useRef<HTMLDivElement>(null), content = useRef<HTMLDivElement>(null), follow = useRef(true);
   const [away, setAway] = useState(false);
-  const dialogue = messages.filter((message) => message.role === "user" || message.role === "assistant");
-  const events = messages.filter((message) => message.role === "tool" || message.role === "system");
+  const dialogue = messages.filter((message) => message.kind !== "activity" && (message.role === "user" || message.role === "assistant"));
+  const events = messages.filter((message) => message.kind === "activity" || message.role === "tool" || message.role === "system");
   useEffect(() => { follow.current = true; setAway(false); }, [conversationId]);
   useEffect(() => { if (viewport.current && follow.current) viewport.current.scrollTop = viewport.current.scrollHeight; }, [messages.at(-1)?.id, conversationId]);
   useEffect(() => {

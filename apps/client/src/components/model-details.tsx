@@ -16,6 +16,8 @@ export type ModelDetailsProps = {
 
 export function ModelDetails(props: ModelDetailsProps) {
   if (props.model.media) return <MediaModelDetails {...props} />;
+  if (props.model.tasks?.length === 1 && (props.model.tasks[0] === "image" || props.model.tasks[0] === "video")) return <MediaModelDetails {...props} model={{ ...props.model, media: { kind: props.model.tasks[0] } }} />;
+  if (props.model.tasks?.includes("audio") && !props.model.tasks.includes("text")) return <SpeechModelDetails {...props} />;
   const { model, catalog, connection, providerName } = props;
   const { values, sources, reference } = resolveModelMetadata(model, props.providerId, catalog, props.reference);
   function fact(field: keyof ModelMetadata, label: string, value: ReactNode) {
@@ -69,12 +71,17 @@ export function ModelDetails(props: ModelDetailsProps) {
 
 export function SelectedModelInfo(props: ModelDetailsProps) {
   const { values, sources } = resolveModelMetadata(props.model, props.providerId, props.catalog);
-  if (props.model.media) return <div className="selected-model-info"><dl className="model-quick-facts"><div><dt>작업</dt><dd>{props.model.media.kind === "image" ? "이미지" : "영상"}</dd></div><div><dt>해상도</dt><dd>{props.model.media.resolutions?.join(" / ") || "모델별 옵션"}</dd></div><div><dt>참조 이미지</dt><dd>{props.model.media.reference === "required" ? "필수" : props.model.media.reference === "optional" ? "선택" : "미지원"}</dd></div></dl><details className="model-details" key={props.model.id}><summary>미디어 옵션·과금 정보<ChevronDown size={14} /></summary><MediaModelDetails {...props} /></details></div>;
+  if (props.model.media) return <div className="selected-model-info"><dl className="model-quick-facts"><div><dt>작업</dt><dd>{props.model.media.kind === "image" ? "이미지" : "영상"}</dd></div><div><dt>해상도</dt><dd>{props.model.media.resolutions?.join(" / ") || "모델별 옵션"}</dd></div><div><dt>참조 이미지</dt><dd>{props.model.media.reference === "required" ? "필수" : props.model.media.reference === "optional" ? "선택" : props.model.media.reference === "none" ? "미지원" : "미확인"}</dd></div></dl><details className="model-details" key={props.model.id}><summary>미디어 옵션·과금 정보<ChevronDown size={14} /></summary><MediaModelDetails {...props} /></details></div>;
+  if (props.model.tasks?.includes("audio") && !props.model.tasks.includes("text")) return <details className="model-details"><summary>음성 모델 사양<ChevronDown size={14} /></summary><SpeechModelDetails {...props} /></details>;
   return <div className="selected-model-info">
     <dl className="model-quick-facts"><div><dt>컨텍스트</dt><dd>{formatTokens(values.context, true)}</dd></div><div><dt>최대 출력</dt><dd>{formatTokens(values.maxOutput, true)}</dd></div><div><dt>입력</dt><dd>{values.input?.join(" · ") || "미확인"}</dd></div></dl>
     <div className="model-quick-source">{sources.context === "provider" ? "컨텍스트: 계정 API 확인" : sources.context === "provider-catalog" ? "컨텍스트: 제공자 공개 모델 사양" : sources.context === "catalog" ? "컨텍스트: models.dev 참고 사양" : "컨텍스트 정보 미확인"}</div>
     <details className="model-details" key={props.model.id}><summary>사양·기능·가격<ChevronDown size={14} /></summary><ModelDetails {...props} /></details>
   </div>;
+}
+
+function SpeechModelDetails({ model, providerName }: ModelDetailsProps) {
+  return <div className="model-details-content"><header className="model-details-heading"><h3>{model.name}</h3><code>{model.id}</code></header>{model.metadata?.description && <p className="model-description">{model.metadata.description}</p>}<dl className="model-facts"><div className="model-fact"><dt>제공자</dt><dd>{providerName}</dd></div><div className="model-fact"><dt>작업</dt><dd>음성</dd></div><div className="model-fact"><dt>최대 입력 글자</dt><dd>{model.speech?.maxCharacters?.toLocaleString("ko-KR") || "미확인"}</dd></div>{model.endpoints.length > 0 && <div className="model-fact"><dt>호출 경로</dt><dd><code>{model.endpoints.join(", ")}</code></dd></div>}</dl><h4 className="media-facts-title">음성 과금 정보</h4><p className="metadata-note">이 목록에는 음성 생성의 정확한 단가가 제공되지 않았습니다. 선택한 제공자의 계정·모델 요금을 확인하세요.</p></div>;
 }
 
 function MediaModelDetails({ model, providerName, connection }: ModelDetailsProps) {
@@ -93,7 +100,7 @@ function MediaModelDetails({ model, providerName, connection }: ModelDetailsProp
       <div className="model-fact"><dt>해상도</dt><dd>{media.resolutions?.join(", ") || (byteplus ? "모델별 지원값 확인 후 입력" : "endpoint 옵션 조회 필요")}</dd></div>
       <div className="model-fact"><dt>화면비</dt><dd>{media.aspectRatios?.join(", ") || (byteplus ? "ratio 옵션 · 모델별 확인" : "endpoint 옵션 조회 필요")}</dd></div>
       {media.kind === "video" && <div className="model-fact"><dt>길이 (초)</dt><dd>{media.durations?.join(", ") || "모델별 옵션"}</dd></div>}
-      <div className="model-fact"><dt>참조 이미지</dt><dd>{media.reference === "required" ? "필수" : media.reference === "optional" ? "선택" : "미지원"}{media.maxReferences ? ` · 최대 ${media.maxReferences}장` : ""}</dd></div>
+      <div className="model-fact"><dt>참조 이미지</dt><dd>{media.reference === "required" ? "필수" : media.reference === "optional" ? "선택" : media.reference === "none" ? "미지원" : "미확인"}{media.maxReferences ? ` · 최대 ${media.maxReferences}장` : ""}</dd></div>
       <div className="model-fact"><dt>오디오 생성</dt><dd>{formatCapability(media.generateAudio)}</dd></div>
       {!!model.endpoints.length && <div className="model-fact"><dt>호출 경로</dt><dd><code>{model.endpoints.join(", ")}</code></dd></div>}
     </dl>

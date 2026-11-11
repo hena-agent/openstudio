@@ -10,7 +10,7 @@ import { workflowDefinitionSchema, workflowIssues } from "@openstudio/shared/wor
 import { AppError, transaction } from "./storage";
 import { refreshOpenAI } from "./openai-oauth";
 import { inferenceEndpoint, providerHeaders } from "./providers";
-import { addLog, finalizeWorkflowTask, taskProjectIn, workflowRunId } from "./workflows";
+import { addLog, finalizeWorkflowTask, taskProjectIn, validateStepConfiguration, workflowRunId } from "./workflows";
 import type { AgentResult, StoredWorkflowTask } from "./workflow-types";
 import { piResponsesFetch } from "./pi-responses-fetch";
 import { referenceData } from "./assets";
@@ -64,6 +64,7 @@ export async function runPreparationAgent(workspaceId: string, task: StoredWorkf
     const current = data.workflowTasks!.find((item) => item.id === task.id)!;
     if (current.result) throw new AppError("이미 결과가 제출됐습니다.", 409);
     if (current.notes.length > current.deliveredNotes) throw new AppError("새 사용자 피드백을 먼저 반영하고 다시 제출하세요.", 409);
+    if (result.type === "proposal") validateStepConfiguration(data, result.steps);
     current.result = result;
   });
   function tool(name: string, description: string, schema: z.ZodType, parse: (args: unknown) => AgentResult): AgentTool {
@@ -72,7 +73,7 @@ export async function runPreparationAgent(workspaceId: string, task: StoredWorkf
     } };
   }
   const tools = [
-    task.kind === "plan" ? tool("propose_workflow", "영상 한 편의 제작 스텝을 제출한다. 채널 브랜딩·편성표·주간 운영·여러 편 일괄 제작은 범위에 포함하지 않는다. 실제 에셋이나 영상은 생성하지 않는다.", proposalSchema, (args) => {
+    task.kind === "plan" ? tool("propose_workflow", "영상 한 편의 제작 스텝을 제출한다. 단순 검수·승인은 별도 사용자 작업이 아니라 검토할 결과를 만드는 스텝의 review=true로 표현한다. manual은 사용자가 실제 원고·자료·파일 등 결과를 제공하는 작업에만 사용한다. 채널 브랜딩·편성표·주간 운영·여러 편 일괄 제작은 범위에 포함하지 않는다. 실제 에셋이나 영상은 생성하지 않는다.", proposalSchema, (args) => {
       const proposal = proposalSchema.parse(args);
       if (!proposal.steps.length) throw new AppError("최소 한 개의 스텝이 필요합니다.");
       const issues = workflowIssues(proposal); if (issues.length) throw new AppError(issues[0].message);
@@ -92,13 +93,16 @@ export async function runPreparationAgent(workspaceId: string, task: StoredWorkf
         : "In step mode, brief describes THIS SESSION'S VIDEO and guidance holds reusable project directions. If a concrete missing topic/message blocks this step, ask only that question. Do not expand the project into a channel launch or marketing strategy.",
       "Unspecified optional settings are not blockers. Do not repeatedly ask for branding, production budget or tools. Use a reasonable lightweight approach consistent with available settings, and state provisional choices briefly in the proposal. Ask only if a concrete missing decision blocks this video.",
       "Use the supplied chronological conversation to understand prior questions, answers and decisions. Do not interpret short answers without that context. Latest explicit user direction and saved settings override older assistant assumptions. Older plans may contain channel operations or multi-video steps: remove those when proposing this single video instead of preserving their scope.",
-      "Plan only the necessary stages that lead from this video's idea to script, scenes, required assets/audio, composition, review and output, combining or skipping stages where appropriate. Reference images are supplied with their intended purpose. When delivery is descriptions-only, use the purpose/metadata without pretending to have seen the image.",
+      "Plan only the necessary producing stages that lead from this video's idea to script, scenes, required assets/audio, composition and output, combining or skipping stages where appropriate. Reference images are supplied with their intended purpose. When delivery is descriptions-only, use the purpose/metadata without pretending to have seen the image.",
+      "Review and approval are gates on a producing step, not standalone tasks. Do not create a manual step merely for user review, quality checks, approval or sign-off (for example 출력 전 사용자 검수). Set review=true on each step whose result needs inspection, and put concrete review criteria in that step's instruction. The user reviews that result and approves its exact version before dependent steps proceed. Reserve kind=manual for work where the user actually supplies a new result such as a script, reference material or a file, never an approval note.",
+      "When revising an existing plan containing a review-only step, remove that step, enable review on its input producing steps and reconnect its downstream consumers directly to those inputs. Preserve the producing step IDs and valid dependency order. Do not remove manual steps that supply real content or files. Existing production sessions remain frozen; a revised plan applies to future sessions.",
       "Respect the supplied video width, height and duration for the main output; variants are optional. Do not invent a monthly or multi-video budget. A budget setting is a limit, not permission to spend or submit paid media jobs.",
       "Plan and prepare editable studio steps, not a fixed topic or pipeline. Support dependencies, review gates, image-based, direct-video and SVG/HTML strategies and multiple output variants.",
       "This is PREPARATION ONLY. Never claim to have generated images, audio, video or rendered exports. You have no media-generation, filesystem, browser, shell or rendering tools.",
       "For image/video/audio/compose/export steps write a usable production specification. For code steps return self-contained SVG or HTML code; no markdown fences, external assets or network. Use a render(t) time interface where useful.",
       "Use propose_workflow for a plan, submit_result for step work, or ask_user if necessary. A plain answer does not submit a result. Submit exactly one outcome.",
       "Preserve relevant existing step IDs when revising a plan. Use short unique IDs for new steps and real input references; never invent account/model bindings. Inherit the project agent by omitting step.agent. Review is user-configurable.",
+      "List steps in execution order: every input must reference an earlier step in the array, never the same or a later step. Preserve valid explicit step.agent overrides unless the user asks to change them; unassigned steps inherit the project agent.",
       "You cannot approve results or advance steps. OpenStudio enforces user review. Use only approved input artifacts provided below. Incorporate the previous result and feedback when revising.",
       "Feedback history is chronological. If it conflicts with the latest instructions or feedback, follow the latest user direction.",
     ].join("\n") },

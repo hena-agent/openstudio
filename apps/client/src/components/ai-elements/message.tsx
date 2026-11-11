@@ -9,8 +9,8 @@ export function Message({ from, className, ...props }: ComponentProps<"article">
   return <article data-slot="message" data-from={from} className={cn("flex flex-col gap-2", from === "user" ? "items-end" : "items-start", className)} {...props} />;
 }
 export function MessageContent({ className, ...props }: ComponentProps<"div">) { return <div data-slot="message-content" className={cn("max-w-full rounded-lg px-4 py-3 text-[15px] leading-7 whitespace-pre-wrap break-words [overflow-wrap:anywhere] [[data-from=user]_&]:bg-secondary [[data-from=assistant]_&]:px-0 [[data-from=assistant]_&]:py-0", className)} {...props} />; }
-export function MessageResponse({ children }: { children: string }) {
-  return <MessageContent className="message-markdown w-full whitespace-normal"><Markdown remarkPlugins={[remarkGfm]} skipHtml components={{
+export function MessageResponse({ children, className }: { children: string; className?: string }) {
+  return <MessageContent className={cn("message-markdown w-full p-0 whitespace-normal", className)}><Markdown remarkPlugins={[remarkGfm]} skipHtml components={{
     table: ({ children }) => <div className="max-w-full overflow-x-auto"><table>{children}</table></div>,
     img: ({ alt }) => <span className="text-muted-foreground">{alt}</span>,
   }}>{children}</Markdown></MessageContent>;
