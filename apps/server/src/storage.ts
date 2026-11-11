@@ -4,8 +4,8 @@ import path from "node:path";
 import { z } from "zod";
 import type { Asset, Connection, DeviceAuthorization, MediaJob, RegisteredModel } from "@openstudio/shared/types";
 import { database, StorageConflict, type JobIndex } from "@openstudio/database";
-import type { WorkflowProject } from "@openstudio/shared/workflow";
-import type { StoredWorkflowTask } from "./workflow-types";
+import type { ProductionPreset, WorkflowProject } from "@openstudio/shared/workflow";
+import type { StoredProductionSession, StoredWorkflowTask } from "./workflow-types";
 
 export class AppError extends Error {
   constructor(message: string, public status = 400, public code = "invalid_request", public upstreamStatus?: number) {
@@ -39,7 +39,7 @@ export type PendingDevice = DeviceAuthorization & {
   processing?: boolean;
   accessToken?: string;
 };
-export type Workspace = { connections: StoredConnection[]; pending: PendingDevice[]; openaiAttempts?: OpenAIAttempt[]; routerAttempts?: OpenRouterAttempt[]; assets?: Asset[]; jobs?: StoredJob[]; registeredModels?: RegisteredModel[]; textRuns?: { id: string; model: string; prompt: string; text: string; createdAt: string }[]; projects?: WorkflowProject[]; workflowTasks?: StoredWorkflowTask[] };
+export type Workspace = { connections: StoredConnection[]; pending: PendingDevice[]; openaiAttempts?: OpenAIAttempt[]; routerAttempts?: OpenRouterAttempt[]; assets?: Asset[]; jobs?: StoredJob[]; registeredModels?: RegisteredModel[]; textRuns?: { id: string; model: string; prompt: string; text: string; createdAt: string }[]; projects?: WorkflowProject[]; workflowTasks?: StoredWorkflowTask[]; productionPresets?: ProductionPreset[]; productionSessions?: StoredProductionSession[] };
 export const dataRoot = () => process.env.OPENSTUDIO_DATA_DIR || path.join(process.cwd(), ".data");
 const root = dataRoot;
 

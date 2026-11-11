@@ -1,15 +1,17 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { closeDatabases } from "@openstudio/database";
 import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
-import { workflowIssues, type WorkflowProject, type WorkflowStep } from "@openstudio/shared/workflow";
+import { workflowIssues, productionSettingsSchema, type WorkflowProject, type WorkflowStep } from "@openstudio/shared/workflow";
 import { transaction } from "./storage";
-import { mutateWorkflow, projectIn, recoverWorkflowTasks, workflowManifest } from "./workflows";
+import { mutateWorkflow, projectIn, recoverWorkflowTasks, saveProductionPreset, sessionIn, workflowManifest, workflowResult } from "./workflows";
 import { processWorkflowTask } from "./workflow-agent";
 import { dispatch } from "./api-server";
+import { saveMedia } from "./assets";
 
 const alice = "a".repeat(64), bob = "b".repeat(64), account = "6692bc16-ee4b-443d-b996-6aad5f1099ff";
 const binding = { connectionId: account, modelId: "text-model" };
@@ -26,11 +28,15 @@ async function create(steps: WorkflowStep[] = []) {
   return (await mutateWorkflow(alice, { action: "save", id: project.id, revision: project.revision, name: project.name, brief: project.brief, agent: binding, steps, outputs: steps.some((item) => item.id === "export") ? outputs : [] })).project;
 }
 const get = (id: string) => transaction(alice, (data) => structuredClone(projectIn(data, id)));
+const getSession = (projectId: string, id: string) => transaction(alice, (data) => structuredClone(sessionIn(data, projectId, id)));
+async function startSession(project: WorkflowProject, name = "영상 A") {
+  return (await mutateWorkflow(alice, { action: "start-session", id: project.id, revision: project.revision, requestId: crypto.randomUUID(), name, brief: `${name}의 구체적인 주제`, references: [] })).session!;
+}
 function streamTool(name: string, args: object, before?: () => Promise<void>): StreamFn {
   return async (model) => {
     await before?.();
     const stream = new AssistantMessageEventStream();
-    const message = { role: "assistant" as const, content: [{ type: "toolCall" as const, id: crypto.randomUUID(), name, arguments: JSON.parse(JSON.stringify(args)) }], api: model.api, provider: model.provider, model: model.id, stopReason: "toolUse" as const, timestamp: Date.now(), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+    const message = { role: "assistant" as const, content: [{ type: "toolCall" as const, id: crypto.randomUUID(), name, arguments: JSON.parse(JSON.stringify(name === "propose_workflow" ? { scope: "single-video", ...args } : args)) }], api: model.api, provider: model.provider, model: model.id, stopReason: "toolUse" as const, timestamp: Date.now(), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     stream.push({ type: "start", partial: message }); stream.push({ type: "done", reason: "toolUse", message }); stream.end(); return stream;
   };
 }
@@ -40,6 +46,180 @@ async function run(project: WorkflowProject, stepId?: string, all = false, feedb
 }
 
 describe("production preparation workflow", () => {
+  it("recovers session work after reopening SQLite without replaying committed or ambiguous model calls", async () => {
+    const project = await create([step("script")]), a = await startSession(project), b = await startSession(project, "B");
+    const first = (await mutateWorkflow(alice, { action: "run", id: project.id, sessionId: a.id, stepId: "script", requestId: crypto.randomUUID(), consent: true })).task!;
+    const second = (await mutateWorkflow(alice, { action: "run", id: project.id, sessionId: b.id, stepId: "script", requestId: crypto.randomUUID(), consent: true })).task!;
+    await transaction(alice, (data) => {
+      Object.assign(data.workflowTasks!.find((task) => task.id === first.id)!, { status: "running", runId: "old-process", result: { type: "artifact", content: "Committed session result" } });
+      Object.assign(data.workflowTasks!.find((task) => task.id === second.id)!, { status: "running", runId: "old-process" });
+    });
+    closeDatabases();
+    await transaction(alice, (data) => recoverWorkflowTasks(data));
+    await transaction(alice, (data) => recoverWorkflowTasks(data));
+    expect((await getSession(project.id, a.id)).artifacts).toHaveLength(1); expect((await getSession(project.id, a.id)).states.script.status).toBe("review");
+    expect((await getSession(project.id, b.id)).artifacts).toHaveLength(0); expect((await getSession(project.id, b.id)).states.script.status).toBe("failed");
+    expect(await transaction(alice, (data) => data.workflowTasks!.find((task) => task.id === second.id)!.status)).toBe("unknown"); expect((await get(project.id)).artifacts).toHaveLength(0);
+  });
+  it("freezes the entire production session and its model catalog across template edits and later steps", async () => {
+    const original = await create([step("script"), step("code", ["script"], false, "code")]);
+    const a = await startSession(original);
+    const first = (await mutateWorkflow(alice, { action: "run", id: original.id, sessionId: a.id, stepId: "script", requestId: crypto.randomUUID(), consent: true, all: true })).task!;
+    const updated = (await mutateWorkflow(alice, { action: "save", ...original, brief: "Different default topic", settings: productionSettingsSchema.parse({ tone: "New tone" }), steps: [{ ...original.steps[0], instruction: "Changed instruction" }, step("extra")] })).project;
+    await transaction(alice, (data) => { data.connections[0].models[0].metadata!.context = 777; data.connections[0].baseURL = "https://changed.example.test"; });
+    const b = await startSession(updated, "영상 B");
+    const second = (await mutateWorkflow(alice, { action: "run", id: original.id, sessionId: b.id, stepId: "script", requestId: crypto.randomUUID(), consent: true })).task!;
+    expect(first.sessionId).toBe(a.id); expect(second.sessionId).toBe(b.id);
+    expect(await transaction(alice, (data) => data.workflowTasks!.find((task) => task.id === first.id)!.status)).toBe("queued");
+    await processWorkflowTask(alice, first.id, streamTool("submit_result", { content: "Original session result" }));
+    let saved = await getSession(original.id, a.id); expect(saved.steps).toEqual(original.steps); expect(saved.sourceRevision).toBe(original.revision); expect(saved.states.script.status).toBe("review"); expect(saved.artifacts[0].stale).toBe(false);
+    await mutateWorkflow(alice, { action: "approve", id: original.id, sessionId: a.id, stepId: "script", artifactId: saved.states.script.artifactId });
+    const queued = await transaction(alice, (data) => structuredClone(data.workflowTasks!.find((task) => task.sessionId === a.id && task.stepId === "code")!));
+    expect(queued.snapshot.step?.instruction).toBe(original.steps[1].instruction); expect(queued.providerBaseURL).toBe("https://api.deepseek.com"); expect(queued.modelSnapshot.metadata?.context).toBeUndefined();
+    await processWorkflowTask(alice, queued.id, streamTool("submit_result", { content: "<svg/>" }));
+    saved = await getSession(original.id, a.id); expect(saved.states.code.status).toBe("complete"); expect((await getSession(original.id, b.id)).artifacts).toEqual([]); expect((await get(original.id)).artifacts).toEqual([]);
+    expect(await transaction(alice, (data) => data.workflowTasks!.find((task) => task.id === second.id)!.modelSnapshot.metadata?.context)).toBe(777);
+  });
+  it("keeps session results, feedback, idempotency keys and approval targets isolated", async () => {
+    const project = await create([step("script")]), a = await startSession(project), b = await startSession(project, "영상 B");
+    const requestId = crypto.randomUUID(), input = { action: "run", id: project.id, sessionId: a.id, stepId: "script", requestId, feedback: "A only", consent: true };
+    const task = (await mutateWorkflow(alice, input)).task!;
+    expect((await mutateWorkflow(alice, input)).task!.id).toBe(task.id);
+    await expect(mutateWorkflow(alice, { ...input, sessionId: b.id })).rejects.toMatchObject({ status: 409 });
+    await expect(mutateWorkflow(alice, { action: "note", id: project.id, sessionId: b.id, taskId: task.id, text: "Wrong session" })).rejects.toMatchObject({ status: 409 });
+    await processWorkflowTask(alice, task.id, streamTool("submit_result", { content: "A result" }));
+    const saved = await getSession(project.id, a.id);
+    await expect(mutateWorkflow(alice, { action: "approve", id: project.id, sessionId: b.id, stepId: "script", artifactId: saved.states.script.artifactId })).rejects.toMatchObject({ status: 409 });
+    await expect(mutateWorkflow(bob, { action: "pause", id: project.id, sessionId: a.id })).rejects.toMatchObject({ status: 404 });
+    const otherProject = await create([step("script")]);
+    await expect(mutateWorkflow(alice, { action: "pause", id: otherProject.id, sessionId: a.id })).rejects.toMatchObject({ status: 404 });
+    expect((await getSession(project.id, b.id)).logs).toEqual([]);
+    const response = await dispatch(new Request("http://127.0.0.1:4567/api/workflows", { headers: { Cookie: `studio_session=${alice}` } }));
+    const text = await response.text(); expect(text).not.toContain("runtimeModels"); expect(text).not.toContain("providerBaseURL"); expect(text).not.toContain("private-account-secret");
+  });
+  it("exposes only approved final results after all session steps finish, with owned real files", async () => {
+    const project = await create([step("main", [], true, "manual"), step("cover", [], true, "manual")]), session = await startSession(project);
+    const image = await saveMedia(alice, new Response(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1])), "image", "cover");
+    await expect(mutateWorkflow(alice, { action: "edit-result", id: project.id, sessionId: session.id, revision: session.revision, stepId: "main", content: "Foreign file", assetIds: [crypto.randomUUID()] })).rejects.toMatchObject({ status: 404 });
+    await mutateWorkflow(alice, { action: "edit-result", id: project.id, sessionId: session.id, revision: session.revision, stepId: "main", content: "Final script" });
+    let saved = await getSession(project.id, session.id), main = saved.states.main.artifactId!;
+    await mutateWorkflow(alice, { action: "approve", id: project.id, sessionId: session.id, stepId: "main", artifactId: main });
+    await expect(workflowResult(alice, session.id, main)).rejects.toMatchObject({ status: 409 });
+    await mutateWorkflow(alice, { action: "edit-result", id: project.id, sessionId: session.id, revision: session.revision, stepId: "cover", content: "Cover image", assetIds: [image.id] });
+    saved = await getSession(project.id, session.id);
+    await mutateWorkflow(alice, { action: "approve", id: project.id, sessionId: session.id, stepId: "cover", artifactId: saved.states.cover.artifactId });
+    expect((await workflowResult(alice, session.id, main)).artifact.content).toBe("Final script");
+    expect((await workflowResult(alice, session.id, saved.states.cover.artifactId!)).artifact.assetIds).toEqual([image.id]);
+    await expect(workflowResult(bob, session.id, main)).rejects.toMatchObject({ status: 404 });
+    await mutateWorkflow(alice, { action: "edit-result", id: project.id, sessionId: session.id, revision: session.revision, stepId: "main", content: "Revised script" });
+    await expect(workflowResult(alice, session.id, main)).rejects.toMatchObject({ status: 409 });
+  });
+  it("migrates existing production history once and preserves it independently of later configuration edits", async () => {
+    let project = await create([step("script", [], false)]); const task = await run(project, "script");
+    await processWorkflowTask(alice, task.id, streamTool("submit_result", { content: "Legacy result" }));
+    const request = () => dispatch(new Request("http://127.0.0.1:4567/api/workflows", { headers: { Cookie: `studio_session=${alice}` } }));
+    const first = await (await request()).json(), second = await (await request()).json();
+    expect(first.sessions).toHaveLength(1); expect(second.sessions[0].id).toBe(first.sessions[0].id); expect(first.sessions[0].legacy).toBe(true);
+    project = await get(project.id); await mutateWorkflow(alice, { action: "save", ...project, steps: [] });
+    const saved = await getSession(project.id, first.sessions[0].id); expect(saved.steps).toHaveLength(1); expect(saved.artifacts[0].content).toBe("Legacy result"); expect(saved.states.script.status).toBe("complete");
+    expect(await transaction(alice, (data) => data.workflowTasks![0].sessionId)).toBe(saved.id);
+  });
+  it("rejects session definition edits and execution without a session at the HTTP boundary", async () => {
+    const project = await create([step("script")]), requestId = crypto.randomUUID();
+    const input = { action: "start-session", id: project.id, revision: project.revision, requestId, name: "Episode", brief: "Topic" };
+    const a = (await mutateWorkflow(alice, input)).session!;
+    expect((await mutateWorkflow(alice, input)).session!.id).toBe(a.id);
+    await expect(mutateWorkflow(alice, { ...input, name: "Different" })).rejects.toMatchObject({ status: 409 });
+    await expect(mutateWorkflow(alice, { ...input, requestId: crypto.randomUUID(), revision: project.revision - 1 })).rejects.toMatchObject({ status: 409 });
+    const post = (body: object) => dispatch(new Request("http://127.0.0.1:4567/api/workflows", { method: "POST", headers: { Origin: "http://127.0.0.1:3456", "Content-Type": "application/json", Cookie: `studio_session=${alice}` }, body: JSON.stringify(body) }));
+    expect((await post({ action: "save", ...project, sessionId: a.id, steps: [] })).status).toBe(409);
+    expect((await post({ action: "run", id: project.id, requestId: crypto.randomUUID(), consent: true })).status).toBe(400);
+    expect((await getSession(project.id, a.id)).steps).toEqual(project.steps);
+  });
+  it("keeps legacy results approvable without silently adding new settings or rewriting old plans", async () => {
+    const initial = await create([step("script")]);
+    await transaction(alice, (data) => {
+      const project = projectIn(data, initial.id); delete project.settings; delete project.video; delete project.references; delete project.scope;
+      const definitionHash = createHash("sha256").update(JSON.stringify({ step: project.steps[0], agent: project.agent, brief: project.brief })).digest("hex");
+      const id = crypto.randomUUID(); project.artifacts.push({ id, stepId: "script", version: 1, content: "Legacy script", kind: "text", createdAt: "now", source: "agent", definitionHash, inputArtifacts: {} }); project.states.script = { status: "review", artifactId: id };
+    });
+    let project = await get(initial.id);
+    project = (await mutateWorkflow(alice, { action: "approve", id: project.id, stepId: "script", artifactId: project.states.script.artifactId })).project;
+    project = (await mutateWorkflow(alice, { action: "save", ...project })).project;
+    expect(project.settings).toBeUndefined(); expect(project.video).toBeUndefined(); expect(project.scope).toBeUndefined(); expect(project.states.script.status).toBe("complete"); expect(project.artifacts[0].stale).not.toBe(true);
+  });
+  it("reuses isolated preset copies and checks preset revisions and asset ownership", async () => {
+    const settings = productionSettingsSchema.parse({ brand: "Man School", tone: "차분하고 간결하게", budget: "편당 1만원 이하" });
+    const preset = (await saveProductionPreset(alice, { name: "채널 기본값", settings, agent: binding })).preset;
+    const project = (await mutateWorkflow(alice, { action: "create", name: "첫 영상", brief: "약속을 지키는 태도", presetId: preset.id })).project;
+    expect(project.settings).toEqual(settings); expect(project.agent).toEqual(binding); expect(project.scope).toBe("single-video");
+    const updated = (await saveProductionPreset(alice, { ...preset, settings: { ...settings, tone: "밝고 경쾌하게" } })).preset;
+    expect(updated.revision).toBe(2); expect((await get(project.id)).settings?.tone).toBe(settings.tone);
+    await expect(saveProductionPreset(alice, preset)).rejects.toMatchObject({ status: 409 });
+    await expect(saveProductionPreset(bob, { ...preset, agent: undefined })).rejects.toMatchObject({ status: 404 });
+    await expect(mutateWorkflow(bob, { action: "create", name: "Other", brief: "Other", presetId: preset.id })).rejects.toMatchObject({ status: 404 });
+    const image = await saveMedia(alice, new Response(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1])), "image", "logo");
+    await expect(saveProductionPreset(bob, { name: "Foreign image", settings: { references: [{ assetId: image.id, purpose: "로고" }] } })).rejects.toMatchObject({ status: 404 });
+    const response = await dispatch(new Request("http://127.0.0.1:4567/api/workflows", { headers: { Cookie: `studio_session=${bob}` } }));
+    const data = await response.json(); expect(data.presets).toEqual([]); expect(data.assets).toEqual([]);
+  });
+  it("creates the next video without carrying results, dialogue, approvals or per-video references", async () => {
+    let source = await create([step("script", [], false), step("export", ["script"], false, "export")]);
+    source = (await mutateWorkflow(alice, { action: "save", ...source, settings: productionSettingsSchema.parse({ brand: "Reusable brand", method: "code" }) })).project;
+    for (const id of ["script", "export"]) { const task = await run(source, id); await processWorkflowTask(alice, task.id, streamTool("submit_result", { content: "Original result" })); }
+    source = await get(source.id);
+    const next = (await mutateWorkflow(alice, { action: "create", sourceProjectId: source.id, reuseSteps: true, name: "다음 영상", brief: "다른 하나의 주제" })).project;
+    expect(next.id).not.toBe(source.id); expect(next.settings).toEqual(source.settings); expect(next.steps).toEqual(source.steps); expect(next.outputs).toEqual(source.outputs);
+    expect(next.brief).toBe("다른 하나의 주제"); expect(next.artifacts).toEqual([]); expect(next.logs).toEqual([]); expect(next.proposals).toEqual([]); expect(next.references).toEqual([]); expect(next.autoRun).toBe(false);
+    expect(Object.values(next.states).every((state) => state.status === "idle" && !state.artifactId)).toBe(true);
+    const fresh = (await mutateWorkflow(alice, { action: "create", sourceProjectId: source.id, name: "설정만 복사", brief: "세 번째 주제" })).project;
+    expect(fresh.steps).toEqual([]); expect(fresh.settings).toEqual(source.settings); expect((await get(source.id)).artifacts).toHaveLength(2);
+    await expect(mutateWorkflow(bob, { action: "create", sourceProjectId: source.id, name: "Foreign", brief: "Foreign" })).rejects.toMatchObject({ status: 404 });
+  });
+  it("supplies previous questions and answers with fixed single-video scope and saved production defaults", async () => {
+    let project = await create();
+    project = (await mutateWorkflow(alice, { action: "save", ...project, brief: "한 편의 약속과 책임 이야기", settings: productionSettingsSchema.parse({ brand: "Man School", method: "image", tone: "차분한 말투" }), video: { width: 1920, height: 1080, durationSeconds: 45 } })).project;
+    const first = (await mutateWorkflow(alice, { action: "plan", id: project.id, requestId: crypto.randomUUID(), consent: true })).task!;
+    await processWorkflowTask(alice, first.id, streamTool("ask_user", { question: "이번 편은 약속과 책임 중 어느 쪽을 중심으로 할까요?" }));
+    const second = (await mutateWorkflow(alice, { action: "plan", id: project.id, feedback: "약속이요. 이미 정한 말투를 유지해 주세요.", requestId: crypto.randomUUID(), consent: true })).task!;
+    let inspected = false;
+    await processWorkflowTask(alice, second.id, async (model, context, options) => {
+      inspected = true;
+      const system = JSON.stringify(context.messages.filter((item) => item.role === "system"));
+      expect(system).toContain("EXACTLY ONE VIDEO"); expect(system).toContain("Do not repeatedly ask");
+      const message = context.messages.find((item) => item.role === "user")!;
+      const payload = JSON.parse((message.content as { type: string; text: string }[]).find((item) => item.type === "text")!.text);
+      expect(payload.scope).toBe("single-video"); expect(payload.settings.brand).toBe("Man School"); expect(payload.video.durationSeconds).toBe(45);
+      expect(payload.conversation.some((item: { role: string; text: string }) => item.role === "assistant" && item.text.includes("어느 쪽"))).toBe(true);
+      expect(payload.feedback).toContain("약속이요");
+      return streamTool("propose_workflow", { name: "약속에 대한 영상 한 편", summary: "한 편의 원고와 출력", steps: [step("script")], outputs: [] })(model, context, options);
+    });
+    expect(inspected).toBe(true); expect((await get(project.id)).proposals[0].scope).toBe("single-video");
+  });
+  it("snapshots production settings and invalidates results prepared before a settings change", async () => {
+    const project = await create([step("script")]), task = await run(project, "script");
+    await processWorkflowTask(alice, task.id, streamTool("submit_result", { content: "Old style" }, async () => {
+      await mutateWorkflow(alice, { action: "save", ...project, settings: productionSettingsSchema.parse({ tone: "New style" }) });
+    }));
+    const saved = await get(project.id); expect(saved.states.script.status).toBe("stale");
+    expect(await transaction(alice, (data) => data.workflowTasks!.find((item) => item.id === task.id)!.snapshot.settings?.tone)).toBe("");
+    await expect(mutateWorkflow(alice, { action: "approve", id: project.id, stepId: "script", artifactId: saved.states.script.artifactId })).rejects.toMatchObject({ status: 409 });
+  });
+  it.each(["image", "text"])("delivers reference images only to image-capable models (%s)", async (capability) => {
+    const image = await saveMedia(alice, new Response(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1])), "image", "brand-logo");
+    await transaction(alice, (data) => { data.connections[0].models[0].metadata!.input = ["text", ...(capability === "image" ? ["image"] : [])]; });
+    let project = await create(); project = (await mutateWorkflow(alice, { action: "save", ...project, settings: productionSettingsSchema.parse({ references: [{ assetId: image.id, purpose: "공통 로고" }] }) })).project;
+    const task = (await mutateWorkflow(alice, { action: "plan", id: project.id, requestId: crypto.randomUUID(), consent: true })).task!;
+    let inspected = false;
+    await processWorkflowTask(alice, task.id, async (model, context, options) => {
+      inspected = true; const content = context.messages.find((item) => item.role === "user")!.content as { type: string; text?: string; data?: string }[];
+      expect(content.filter((item) => item.type === "image")).toHaveLength(capability === "image" ? 1 : 0);
+      const prompt = JSON.parse(content.find((item) => item.type === "text")!.text!);
+      expect(prompt.referenceImages[0].purpose).toBe("공통 로고"); expect(prompt.referenceImageDelivery).toBe(capability === "image" ? "attached" : "descriptions-only");
+      return streamTool("ask_user", { question: "이번 편의 주제를 알려 주세요." })(model, context, options);
+    });
+    expect(inspected).toBe(true); expect(JSON.stringify(await get(project.id))).not.toContain("iVBOR");
+  });
   it("renames metadata independently, preserves queued work and ignores stale names in plan saves", async () => {
     const project = await create([step("script")]); const task = await run(project, "script");
     const renamed = (await mutateWorkflow(alice, { action: "rename", id: project.id, previousName: project.name, name: "New project name" })).project;
@@ -61,7 +241,7 @@ describe("production preparation workflow", () => {
     expect(saved.steps).toHaveLength(3); expect(saved.outputs).toHaveLength(2);
     expect(saved.name).toBe(project.name);
     await expect(mutateWorkflow(alice, { action: "apply-proposal", id: saved.id, revision: saved.revision, proposalId: saved.proposals[0].id })).rejects.toMatchObject({ status: 409 });
-    expect(saved.logs.some((log) => log.text.includes("Pi 도구 호출: propose_workflow"))).toBe(true);
+    expect(saved.logs.some((log) => log.text.includes("작업 도구: propose_workflow"))).toBe(true);
   });
   it("pauses at review, approves an exact version once, auto-advances, and exports only preparation data", async () => {
     let project = await create([step("script"), step("code", ["script"], false, "code"), step("export", ["code"], false, "export")]);

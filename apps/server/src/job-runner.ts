@@ -3,7 +3,7 @@ import { database, type ClaimedJob } from "@openstudio/database";
 import { dataRoot, transaction, workspaceIds } from "./storage";
 import { processMediaJob, recoverStalledJobs } from "./media-jobs";
 import { processWorkflowTask } from "./workflow-agent";
-import { recoverWorkflowTasks } from "./workflows";
+import { recoverWorkflowTasks, taskProjectIn } from "./workflows";
 
 export async function startJobRunner({ interval = 1000, concurrency = 2 }: { interval?: number; concurrency?: number } = {}) {
   const db = database(dataRoot()), owner = randomUUID();
@@ -21,7 +21,7 @@ export async function startJobRunner({ interval = 1000, concurrency = 2 }: { int
           const task = data.workflowTasks?.find((item) => item.id === job.id.slice(9));
           if (task && task.status !== "completed") {
             task.status = task.requestStartedAt && !task.result ? "unknown" : "failed"; task.error = "제작 준비 작업의 처리 상태를 확인하지 못했습니다. 기록을 확인하고 다시 실행하세요.";
-            const project = data.projects?.find((item) => item.id === task.projectId);
+            const project = taskProjectIn(data, task);
             if (project) { project.autoRun = false; if (task.stepId) project.states[task.stepId] = { ...project.states[task.stepId], status: "failed", error: task.error }; }
           }
           return;

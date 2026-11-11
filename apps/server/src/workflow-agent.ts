@@ -10,11 +10,12 @@ import { workflowDefinitionSchema, workflowIssues } from "@openstudio/shared/wor
 import { AppError, transaction } from "./storage";
 import { refreshOpenAI } from "./openai-oauth";
 import { inferenceEndpoint, providerHeaders } from "./providers";
-import { addLog, finalizeWorkflowTask, projectIn, workflowRunId } from "./workflows";
+import { addLog, finalizeWorkflowTask, taskProjectIn, workflowRunId } from "./workflows";
 import type { AgentResult, StoredWorkflowTask } from "./workflow-types";
 import { piResponsesFetch } from "./pi-responses-fetch";
+import { referenceData } from "./assets";
 
-const proposalSchema = z.object({ name: z.string().trim().min(1).max(120), summary: z.string().min(1).max(4000), ...workflowDefinitionSchema.shape });
+const proposalSchema = z.object({ scope: z.literal("single-video"), name: z.string().trim().min(1).max(120), summary: z.string().min(1).max(4000), ...workflowDefinitionSchema.shape, outputs: workflowDefinitionSchema.shape.outputs.default([]) });
 const resultSchema = z.object({ content: z.string().trim().min(1).max(40000) });
 const questionSchema = z.object({ question: z.string().trim().min(1).max(2000) });
 const publicFailure = (message?: string) => /401|authentication|invalid.api.key|reconnect/i.test(message || "") ? "에이전트 계정 인증을 확인하고 다시 연결하세요." : /403|permission|scope/i.test(message || "") ? "이 계정에 에이전트 모델·도구 호출 권한이 없습니다." : /429|rate.limit|usage.limit/i.test(message || "") ? "에이전트 모델의 사용량 또는 요청 한도를 초과했습니다." : "에이전트가 응답을 완료하지 못했습니다. 계정·모델의 도구 호출 지원과 사용량을 확인하세요.";
@@ -27,7 +28,7 @@ export function agentModel(task: StoredWorkflowTask): PiModel<any> {
   const model = task.modelSnapshot, provider = task.provider;
   const endpoint = inferenceEndpoint(model, provider);
   const api = provider === "anthropic" || provider === "github-copilot" && endpoint === "/v1/messages" ? "anthropic-messages" : provider === "google" ? "google-generative-ai" : provider === "openai" || provider === "github-copilot" && endpoint === "/responses" ? "openai-responses" : "openai-completions";
-  return { id: model.id, name: model.name, api, provider, baseUrl: task.providerBaseURL, input: ["text"], reasoning: model.metadata?.reasoning === true,
+  return { id: model.id, name: model.name, api, provider, baseUrl: task.providerBaseURL, input: model.metadata?.input?.includes("image") ? ["text", "image"] : ["text"], reasoning: model.metadata?.reasoning === true,
     contextWindow: model.metadata?.context || 128000, maxTokens: Math.min(model.metadata?.maxOutput || 8192, 8192),
     cost: { input: model.metadata?.pricing?.input || 0, output: model.metadata?.pricing?.output || 0, cacheRead: 0, cacheWrite: 0 } };
 }
@@ -71,18 +72,28 @@ export async function runPreparationAgent(workspaceId: string, task: StoredWorkf
     } };
   }
   const tools = [
-    task.kind === "plan" ? tool("propose_workflow", "사용자가 편집할 제작 계획 초안을 제출한다. 실제 에셋이나 영상은 생성하지 않는다.", proposalSchema, (args) => {
+    task.kind === "plan" ? tool("propose_workflow", "영상 한 편의 제작 스텝을 제출한다. 채널 브랜딩·편성표·주간 운영·여러 편 일괄 제작은 범위에 포함하지 않는다. 실제 에셋이나 영상은 생성하지 않는다.", proposalSchema, (args) => {
       const proposal = proposalSchema.parse(args);
       if (!proposal.steps.length) throw new AppError("최소 한 개의 스텝이 필요합니다.");
       const issues = workflowIssues(proposal); if (issues.length) throw new AppError(issues[0].message);
       return { type: "proposal", ...proposal };
     }) : tool("submit_result", "현재 스텝의 원고, 설계 명세 또는 SVG/HTML 소스 코드를 제출한다. 바이너리 생성·렌더링은 하지 않는다.", resultSchema, (args) => ({ type: "artifact", ...resultSchema.parse(args) })),
-    tool("ask_user", "진행에 필요한 사용자 판단이나 정보가 없으면 질문하고 대기한다.", questionSchema, (args) => ({ type: "question", ...questionSchema.parse(args) })),
+    tool("ask_user", "이번 영상 제작을 막는 필수 정보만 짧게 질문한다. 저장된 설정을 다시 묻거나 선택 사항을 필수 설문으로 만들지 않는다.", questionSchema, (args) => ({ type: "question", ...questionSchema.parse(args) })),
   ];
   let turns = 0;
   const agent = new Agent({
     initialState: { model: agentModel(task), thinkingLevel: "off", tools, systemPrompt: [
       "You are the OpenStudio production preparation agent. Respond in Korean unless asked otherwise.",
+      "The unit of work is EXACTLY ONE VIDEO, not a channel, campaign, batch, publishing calendar or multi-week program. Output variants (aspect ratios, subtitles, thumbnail, cutdown) must derive from that same video.",
+      "The project holds a reusable step configuration. Each production session freezes a copy for one video. Do not add a delivery-specification step merely to describe output formats. Actual final results come from producing steps. Mark those steps finalOutput=true when needed; otherwise terminal steps are final. Leave outputs empty: there is no separate output-routing form.",
+      "settings are reusable production defaults: brand, audience, tone, visual style, production method, narration, budget, model references and shared assets. Treat them as established context. NEVER create brand definition, budget selection, account setup, editorial calendar, multiple episodes, community management or weekly analytics steps. These are not video production steps.",
+      task.kind === "plan"
+        ? "In planning mode, brief is reusable production guidance, NOT an episode topic. Design a reusable process that produces ONE video per future session using that session's topic and references. Do not require a specific episode topic just to configure reusable steps, and do not expand broad channel guidance into channel-launch or calendar tasks."
+        : "In step mode, brief describes THIS SESSION'S VIDEO and guidance holds reusable project directions. If a concrete missing topic/message blocks this step, ask only that question. Do not expand the project into a channel launch or marketing strategy.",
+      "Unspecified optional settings are not blockers. Do not repeatedly ask for branding, production budget or tools. Use a reasonable lightweight approach consistent with available settings, and state provisional choices briefly in the proposal. Ask only if a concrete missing decision blocks this video.",
+      "Use the supplied chronological conversation to understand prior questions, answers and decisions. Do not interpret short answers without that context. Latest explicit user direction and saved settings override older assistant assumptions. Older plans may contain channel operations or multi-video steps: remove those when proposing this single video instead of preserving their scope.",
+      "Plan only the necessary stages that lead from this video's idea to script, scenes, required assets/audio, composition, review and output, combining or skipping stages where appropriate. Reference images are supplied with their intended purpose. When delivery is descriptions-only, use the purpose/metadata without pretending to have seen the image.",
+      "Respect the supplied video width, height and duration for the main output; variants are optional. Do not invent a monthly or multi-video budget. A budget setting is a limit, not permission to spend or submit paid media jobs.",
       "Plan and prepare editable studio steps, not a fixed topic or pipeline. Support dependencies, review gates, image-based, direct-video and SVG/HTML strategies and multiple output variants.",
       "This is PREPARATION ONLY. Never claim to have generated images, audio, video or rendered exports. You have no media-generation, filesystem, browser, shell or rendering tools.",
       "For image/video/audio/compose/export steps write a usable production specification. For code steps return self-contained SVG or HTML code; no markdown fences, external assets or network. Use a render(t) time interface where useful.",
@@ -109,16 +120,22 @@ export async function runPreparationAgent(workspaceId: string, task: StoredWorkf
   agent.subscribe(async (event) => {
     let text = "", role: "assistant" | "tool" = "assistant";
     if (event.type === "message_end" && event.message.role === "assistant" && event.message.stopReason !== "error") text = event.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
-    if (event.type === "tool_execution_start") { role = "tool"; text = `Pi 도구 호출: ${event.toolName}`; }
-    if (text) await transaction(workspaceId, (data) => addLog(projectIn(data, task.projectId), role, text, task.id));
+    if (event.type === "tool_execution_start") { role = "tool"; text = `작업 도구: ${event.toolName}`; }
+    if (text) await transaction(workspaceId, (data) => addLog(taskProjectIn(data, task), role, text, task.id));
   });
   const context = task.kind === "plan" ? task.snapshot : { name: task.snapshot.name, brief: task.snapshot.brief, revision: task.snapshot.revision, step: task.snapshot.step,
+    settings: task.snapshot.settings, video: task.snapshot.video, referenceImages: task.snapshot.referenceImages, conversation: task.snapshot.conversation, guidance: task.snapshot.guidance,
     inputs: task.snapshot.inputs, previous: task.snapshot.previous, question: task.snapshot.question, feedbackHistory: task.snapshot.feedbackHistory, outputs: task.snapshot.step?.kind === "export" ? task.snapshot.outputs : undefined };
-  const prompt = JSON.stringify({ mode: task.kind, ...context, feedback: task.feedback });
+  const attachImages = task.modelSnapshot.metadata?.input?.includes("image") === true;
+  const prompt = JSON.stringify({ mode: task.kind, scope: "single-video", ...context, referenceImageDelivery: attachImages ? "attached" : "descriptions-only", feedback: task.feedback });
   if (prompt.length > 140000) throw new AppError("입력 자료가 준비 작업의 크기 제한을 넘었습니다. 입력 연결이나 원고를 줄여 주세요.");
   const timer = setTimeout(() => agent.abort(), 120_000); timer.unref();
   try {
-    await agent.prompt(prompt);
+    const images = attachImages ? await Promise.all((task.snapshot.referenceImages || []).map(async (image) => {
+      const uri = await referenceData(workspaceId, image.id);
+      return { type: "image" as const, data: uri.slice(uri.indexOf(",") + 1), mimeType: image.mime };
+    })) : [];
+    await agent.prompt(prompt, images);
     const completed = await transaction(workspaceId, (data) => data.workflowTasks!.find((item) => item.id === task.id)!.result);
     if (!completed) throw new AppError(agent.state.errorMessage ? publicFailure(agent.state.errorMessage) : "모델이 결과 제출 도구를 호출하지 않았습니다. 도구 호출 지원 모델인지 확인하거나 지시를 조정해 다시 실행하세요.", 502, "agent_incomplete");
   } finally { clearTimeout(timer); }
@@ -128,7 +145,7 @@ export async function processWorkflowTask(workspaceId: string, id: string, strea
     const current = data.workflowTasks?.find((item) => item.id === id);
     if (!current || current.status !== "queued") return;
     current.status = "running"; current.runId = workflowRunId; current.requestStartedAt = new Date().toISOString(); current.updatedAt = current.requestStartedAt;
-    const project = projectIn(data, current.projectId); if (current.stepId) project.states[current.stepId] = { ...project.states[current.stepId], status: "running" };
+    const project = taskProjectIn(data, current); if (current.stepId) project.states[current.stepId] = { ...project.states[current.stepId], status: "running" };
     return structuredClone(current);
   });
   if (!task) return;
@@ -143,7 +160,7 @@ export async function processWorkflowTask(workspaceId: string, id: string, strea
       const current = data.workflowTasks!.find((item) => item.id === id)!;
       if (current.result) { finalizeWorkflowTask(data, current); return; }
       current.status = "failed"; current.error = error instanceof AppError ? error.message : publicFailure(); current.updatedAt = new Date().toISOString();
-      const project = projectIn(data, task.projectId); project.autoRun = false;
+      const project = taskProjectIn(data, current); project.autoRun = false;
       if (task.stepId && project.steps.some((step) => step.id === task.stepId)) project.states[task.stepId] = { ...project.states[task.stepId], status: "failed", error: current.error };
       addLog(project, "system", current.error, task.id);
     });
